@@ -2,6 +2,7 @@ import unittest, math
 from ttf import *
 from random import random, randint
 from typing import List, Union
+from table import glyf
 
 class maxp:
     maxFunctionDefs = 2
@@ -10,14 +11,29 @@ class maxp:
 class head:
     unitsPerEM = 2048
 
+class glyf(glyf):
+    def __init__(self): # override inherited init to create class instance without bytse to interpret
+        self.x = [0, 1, 5, 0, 1, 1.2]
+        self.y = [0, 2,-10, 3, 100, 0.0012]
+        self.flags = [0, 1, 1, 0, 0, -5]
+
+twilight_points = [vec2(0,0), vec2(0,1), vec2(1,0), vec2(1,1), vec2(-1,0), vec2(0,-1), vec2(-1,-1), vec2(12.123, -1239), vec2(-0, 129312)]
+
 def uint32_stack(v:List[Union[int, float]]): return [uint32.to_bytes(i) if i != None else i for i in v]
 def int32_stack(v:List[Union[int, float]]): return [int32.to_bytes(i) if i != None else i for i in v]
 # TODO: looking up opcodes / opnames should not require an instance of Interpreter
 def to_program(I:Interpreter, i:List[str]): return b''.join([uint8.to_bytes(I.opcodes[name] if type(name) == str else name) for name in i])
+def get_glyf_table(I:Interpreter):
+    g = glyf()
+    g.scaled_x, g.scaled_y = map(lambda x: [I.FU_to_px(x0) for x0 in x], [g.x, g.y]) # convert Funits to pixels
+    g.fitted_x, g.fitted_y = map(list.copy, (g.scaled_x, g.scaled_y))
+    return g
 
 class TestTTFOps(unittest.TestCase):
     def setUp(self):
         self.I = Interpreter()
+        self.I.fontsize = 12
+        self.I.dpi = 144
         self.inputs = [
             0, 0, 1, 1, 2, 4,
             -2, 2, 9199213, -9199213,
@@ -585,9 +601,45 @@ class TestTTFOps(unittest.TestCase):
             else:
                 with self.assertRaises(AssertionError): self.I.ops[self.I.opcodes["RCVT"]]()
 
-    def test_GC(self): pass
+    def test_GC(self):
+        self.I.head = head
+        self.I.g = get_glyf_table(self.I)
+        self.I.twilight = twilight_points
+        def test():
+            p = self.I.get_point(i, "zp2", "original" if a else "fitted")
+            pjs = [vec2(0,1), vec2(1,0), vec2(-p.x, -p.y).normalize() if p.x != 0 or p.y != 0 else vec2(1,0)]
+            results = [p.y, p.x, -p.mag() if p.x != 0 or p.y != 0 else 0]
+            for pj, res in zip(pjs, results):
+                self.I.stack, self.I.sp = [uint32.to_bytes(i)], 1
+                self.I.gs["projection_vector"] = pj
+                self.I.ops[self.I.opcodes[f"GC({a},)"]]()
+                self.assertEqual(F26Dot6(self.I.stack[0]), F26Dot6(res))
+        for a in [0, 1]:
+            self.I.gs = {"zp2": 1, "projection_vector": vec2(1, 0)}  # test glyph zone
+            for i in range(len(self.I.g.x)): test()
+            self.I.gs["zp2"] = 0 # test twilight zone
+            for i in range(len(self.I.twilight)): test()
+
+
     def test_SCFS(self): pass
-    def test_MD(self): pass
+    def test_MD(self):
+        self.I.head = head
+        self.I.g = get_glyf_table(self.I)
+        self.I.twilight = twilight_points
+        def test():
+            p1 = self.I.get_point(i, "zp1", "original" if a else "fitted")
+            p2 = self.I.get_point(i+1, "zp0", "original")
+            self.I.stack, self.I.sp = [uint32.to_bytes(i+1), uint32.to_bytes(i)], 2
+            self.I.ops[self.I.opcodes[f"MD({a},)"]]()
+            res = self.I.orthogonal_projection(p2, self.I.gs["projection_vector"]) - self.I.orthogonal_projection(p1, self.I.gs["projection_vector"])
+            self.assertEqual(F26Dot6(self.I.stack[0]), F26Dot6(self.I.FU_to_px(res)))
+        
+        for a in [0,1]:
+            self.I.gs = {"zp0": 1, "zp1": 1, "projection_vector": vec2(1, 0)} # test glyph zone
+            for i in range(0, len(self.I.g.x)-1, 2): test()
+            self.I.gs["zp0"] = self.I.gs["zp1"] = 0 # test twilight zone
+            for i in range(0, len(self.I.twilight)-1, 2): test()
+
     def test_MPPEM(self):
         self.I.fontsize, self.I.dpi = 12, 144
         self.I.stack, self.I.sp = [None], 0
@@ -686,18 +738,17 @@ class TestTTFOps(unittest.TestCase):
             self.assertEqual(self.I.sp, 1)
 
     def test_DIV(self):
-        self.I.callstack = [{"context": "fpgm", "ip": 0}] # for error message in division by zero
         for i1, i2 in zip(self.inputs, self.inputs[1:]):
             self.I.stack = list(map(lambda x: F26Dot6.to_bytes(x), (i1, i2)))
             self.I.sp = 2
+            self.I.ops[self.I.opcodes["DIV"]]()
             if F26Dot6(i2) == 0:
-                with self.assertRaises(AssertionError): self.I.ops[self.I.opcodes["DIV"]]()
+                self.assertEqual(F26Dot6(self.I.stack[0]), F26Dot6((-1 if i1 < 0 else 1) * 0xFFFFFFFF))
             else:
-                self.I.ops[self.I.opcodes["DIV"]]()
                 self.assertEqual(F26Dot6(self.I.stack[0]), F26Dot6(F26Dot6(i1) / F26Dot6(i2)))
         self.I.stack, self.I.sp = [F26Dot6.to_bytes(1), F26Dot6.to_bytes(0)], 2
-        self.I.callstack = [{"context": "fpgm", "ip": 0}] # for error message in division by zero
-        with self.assertRaises(AssertionError): self.I.ops[self.I.opcodes["DIV"]]()
+        self.I.ops[self.I.opcodes["DIV"]]()
+        self.assertEqual(F26Dot6(self.I.stack[0]), F26Dot6(0xFFFFFFFF))
 
     def test_MUL(self):
         for i1, i2 in zip(self.inputs, self.inputs[1:]):

@@ -306,7 +306,7 @@ class Interpreter:
         self.functions = [None] * self.maxp.maxFunctionDefs # contains strings like: program[o = fpgm, 1 = cvt]:instructionPointer
         self.cvt = [FWord(self.tables["cvt "][i:i+2]) for i in range(0, self.table_directory["cvt "].length, 2)] # NOTE: not a proper table object
         self.cvt = [F26Dot6(i) for i in self.cvt]
-        self.twilight = [None] * self.maxp.maxTwilightPoints
+        self.twilight = [vec2(0,0)] * self.maxp.maxTwilightPoints # points are never reset. MS claims its after each prep program, but APPLE says a valid glyf program initializes them before using them so reset should be unnecessary.
 
         self.fontsize = fontsize
         self.dpi = 144 # TODO: get value from screen device
@@ -388,10 +388,15 @@ class Interpreter:
             case "glyf":
                 assert hasattr(self, "glyf"), "No glyph program loaded yet. use getGlyph method"
                 return self.glyf
+    
+    def get_point(self, point_index:int, zone_pointer:str, outline:str="original"):
+        assert zone_pointer in ["zp0", "zp1", "zp2"]
+        zp = self.gs[zone_pointer]
+        if zp == 0: return self.twilight[point_index]
+        else: return self.g.get_point(point_index, outline)
 
     def getGlyph(self, unicode:int):
         glyphIndex = self.cmap.subtable.getGlyphIndex(unicode)
-        print(f"{glyphIndex=}")
         glyphOffset = self.loca[glyphIndex]
         glyphLength = self.loca[glyphIndex + 1] - glyphOffset
         self.g = glyf(self.tables["glyf"][glyphOffset:glyphOffset+glyphLength])
@@ -410,7 +415,7 @@ class Interpreter:
         
         # TODO: make points into vec2 instead of storing x and y separately
         self.g.scaled_x, self.g.scaled_y = map(lambda x: [self.FU_to_px(x0) for x0 in x], [self.g.x, self.g.y]) # convert Funits to pixels
-        self.g.fit_x, self.g.fit_y = map(list.copy, (self.g.scaled_x, self.g.scaled_y))
+        self.g.fitted_x, self.g.fitted_y = map(list.copy, (self.g.scaled_x, self.g.scaled_y))
         gs_backup = self.gs.copy()
 
         self.run_program(self.g.instructions, "glyf") # move stuff in self.g.fit_x and self.g.fit_y
@@ -421,9 +426,11 @@ class Interpreter:
 
     def FU_to_px(self, v:Union[float, int]) -> float: return v * (self.fontsize * self.dpi) / (72 * self.head.unitsPerEM)
 
-    def orthogonal_projection(self, v1:vec2, v2:vec2) -> vec2:
-        """returns vector v1 as orthogonally projected onto v2"""
-        return v2 * (v1.dot(v2) / (v2.dot(v2)))
+    def orthogonal_projection(self, v1:vec2, v2:vec2) -> float:
+        """
+        projects v1 orthogonally onto v2. v2 is treated as a "ruler", so after projection v1 is a scalar along v2. this scalar can be negative, unlike magnitude. To get vector from this, simply multiply by vec2.
+        """
+        return (v1.dot(v2) / (v2.dot(v2)))
     
     def print_debug(self, op:str, v:bytes=None):
         c, ip = self.callstack[-1].values()
@@ -800,13 +807,12 @@ class Interpreter:
         """
         assert 0 <= (i:=uint32(self.pop())) < len(self.cvt)
         self.push(F26Dot6.to_bytes(self.cvt[i]))
-    def GC(self, a): raise NotImplementedError
-    #     """Get Coordinate projected onto the projection vector"""
-    #     pi1 = uint32(self.pop())
-    #     assert self.gs["zp2"] == 1 and a == 1, "Not implemented"
-    #     p1 = self.g.get_point(pi1)
-    #     v = self.orthogonal_projection(vec2(p1.x, p1.y), self.gs["projection_vector"]).mag()
-    #     self.push(F26Dot6.to_bytes(v))
+    def GC(self, a):
+        """Get Coordinate projected onto the projection vector"""
+        assert a in [0,1]
+        p = self.get_point(uint32(self.pop()), "zp2", "original" if a else "fitted")
+        v = self.orthogonal_projection(vec2(p.x, p.y), self.gs["projection_vector"])
+        self.push(F26Dot6.to_bytes(v))
     def SCFS(self): raise NotImplementedError
     def MD(self, a):
         """
@@ -814,16 +820,13 @@ class Interpreter:
         Pop two uint32 (point indices p1 and p2) from the stack. p1 uses zp1, p2 uses zp0. Project the points onto the projection vector. Then measure distance from point 1 to point 2 (point 2 - point 1). The distance is measured in pixels and pushed onto the stack as a F26Dot6.
         If a is 0, the distance is measured in the grid fitted outline, if a is 1 its measured in the original outline.
         """
-        pi1, pi2 = uint32(self.pop()), uint32(self.pop())
+        assert a in [0,1]
         assert hasattr(self, "g"), "No glyph loaded"
-        p1 = self.g.get_point(pi1) if self.gs["zp1"] == 1 else self.twilight[pi1]
-        p2 = self.g.get_point(pi2) if self.gs["zp0"] == 1 else self.twilight[pi2]
-        if a == 0: raise NotImplementedError
-        elif a == 1:
-            p1p = self.orthogonal_projection(p1, self.gs["projection_vector"])
-            p2p = self.orthogonal_projection(p2, self.gs["projection_vector"])
-            self.push(F26Dot6.to_bytes(self.FU_to_px((p2p - p1p).mag())))
-        # project onto projection vector.
+        p1 = self.get_point(uint32(self.pop()), "zp1", "original" if a else "fitted")
+        p2 = self.get_point(uint32(self.pop()), "zp0", "original" if a else "fitted")
+        p1p = self.orthogonal_projection(p1, self.gs["projection_vector"])
+        p2p = self.orthogonal_projection(p2, self.gs["projection_vector"])
+        self.push(F26Dot6.to_bytes(self.FU_to_px(p2p - p1p)))
     def MPPEM(self):
         """Measure Pixels Per EM"""
         # ignoring direction of projection vector, so scaling is linear in all directions.
@@ -911,8 +914,8 @@ class Interpreter:
     def SUB(self): self.push(F26Dot6.to_bytes(-F26Dot6(self.pop()) + F26Dot6(self.pop())))
     def DIV(self):
         a, b = F26Dot6(self.pop()), F26Dot6(self.pop())
-        assert a != 0, f"Error: division by zero in {self.callstack[-1]['context']} instruction {self.callstack[-1]['ip']}"
-        self.push(F26Dot6.to_bytes(b / a))
+        if a == 0: self.push(F26Dot6.to_bytes((-1 if b < 0 else 1) * 0xFFFFFFFF))
+        else: self.push(F26Dot6.to_bytes(b / a))
     def MUL(self):
         a, b = F26Dot6(self.pop()), F26Dot6(self.pop())
         self.push(F26Dot6.to_bytes(a * b))

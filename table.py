@@ -259,5 +259,10 @@ class glyf(table):
                 i += 1
         elif self.numberOfContours < 0: raise NotImplementedError("Compound glyph")
     
-    def get_point(self, i:int) -> glyphPoint: return self.glyphPoint(self.x[i], self.y[i], bool
-    (self.flags[i] & 0x1) if i < len(self.flags) else False)
+    def get_point(self, i:int, outline:str="original") -> glyphPoint:
+        assert outline in ["original", "scaled", "fitted"]
+        if outline == "original": x, y = self.x, self.y
+        elif outline == "scaled": x, y = self.scaled_x, self.scaled_y
+        else: x,y = self.fitted_x, self.fitted_y
+        assert len(x) > i >= 0, f"Error: invalid index {i=}"
+        return self.glyphPoint(x[i], y[i], bool(self.flags[i] & 0x1) if i < len(self.flags) else False) # False is returned for phantom points
