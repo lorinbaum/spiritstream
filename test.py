@@ -506,7 +506,7 @@ class TestTTFOps(unittest.TestCase):
     def test_IP(self): pass
     def test_MSIRP(self): pass
     def test_ALIGNRP(self): pass
-    def test_RTDG(self): pass
+    # def test_RTDG(self): pass
     def test_MIAP(self): pass
 
     def test_NPUSHB(self):
@@ -785,8 +785,26 @@ class TestTTFOps(unittest.TestCase):
             self.I.ops[self.I.opcodes["CEILING"]]()
             self.assertEqual(F26Dot6(self.I.stack[0]), F26Dot6(math.ceil(F26Dot6(i))))
 
-    def test_ROUND(self): pass
-    def test_NROUND(self): pass
+    def test_ROUND(self):
+        rounding = ["RTHG", "RTG", "RTDG", "RDTG", "RUTG", "ROFF"] #, "SROUND", "S45ROUND"]
+        self.I.gs = {"round_state": False, "minimum_distance": 0}
+        for i in self.inputs:
+            i = F26Dot6(i)
+            for r in rounding:
+                self.I.ops[self.I.opcodes[r]]()
+                self.I.stack, self.I.sp = [F26Dot6.to_bytes(i)], 1
+                self.I.ops[self.I.opcodes["ROUND(0,)"]]()
+                match r:
+                    case "RTHG": res = (i + 1) // 1 - 0.5
+                    case "RTG": res = (i + 0.5) // 1
+                    case "RTDG": res = (i + 0.25) // 0.5 * 0.5
+                    case "RDTG": res = math.floor(i)
+                    case "RUTG": res = math.ceil(i)
+                    case "ROFF": res = i
+                self.assertEqual(F26Dot6(self.I.stack[0]), F26Dot6(res))
+                self.assertEqual(self.I.sp, 1)
+
+    # def test_NROUND(self): pass
     def test_WCVTF(self):
         for i in self.inputs:
             self.I.stack, self.I.sp = uint32_stack([5, 1526, 0]) + [uint32.to_bytes(i)], 4
@@ -805,15 +823,15 @@ class TestTTFOps(unittest.TestCase):
     def test_DELTAC1(self): pass
     def test_DELTAC2(self): pass
     def test_DELTAC3(self): pass
-    def test_SROUND(self): pass
-    def test_S45ROUND(self): pass
+    # def test_SROUND(self): pass
+    # def test_S45ROUND(self): pass
     def test_JROT(self): pass
     def test_JROF(self): pass
-    def test_ROFF(self): pass
-    def test_RUTG(self): pass
-    def test_RDTG(self): pass
+    # def test_ROFF(self): pass
+    # def test_RUTG(self): pass
+    # def test_RDTG(self): pass
     def test_SANGW(self): pass
-    def test_AA(self): pass
+    # def test_AA(self): pass
     def test_FLIPPT(self): pass
     def test_FLIPRGON(self): pass
     def test_FLIPRGOFF(self): pass

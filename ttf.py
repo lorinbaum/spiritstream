@@ -11,16 +11,6 @@ from table import *
 def pad4(b:bytes) -> bytes: return b.ljust((len(b) + 3) // 4 * 4, b'\0')
 def checkSum(b:bytes) -> int: return sum([int.from_bytes(b[i:i+4], "big") for i in range(0, len(b), 4) if (b:=pad4(b))]) & 0xFFFFFFFF
 
-class RoundState(Enum):
-    RTHG = auto() # round to half grid
-    RTG = auto() # round to grid
-    RTDG = auto() # Round to double grid
-    RDTG = auto() # round down to grid
-    RUTG = auto() # round up to grid
-    OFF = auto() # no rounding
-    SROUND = auto()
-    S45ROUND = auto()
-
 class Interpreter:
     def __init__(self, fontfile=None, test=False, debug=False):
         self.debug:bool = debug
@@ -38,7 +28,8 @@ class Interpreter:
             "loop": 1,
             "minimum_distance": 1, # F26Dot6
             "projection_vector": vec2(1, 0),
-            "round_state": RoundState.RTG,
+            "round_state": {"period": 1, "phase": 0, "threshold": 0.5},
+            # "round_state": RoundState.RTG,
             "rp0": 0,
             "rp1": 0,
             "rp2": 0,
@@ -395,6 +386,14 @@ class Interpreter:
         if zp == 0: return self.twilight[point_index]
         else: return self.g.get_point(point_index, outline)
 
+    def move(self, point_index:int, zone_pointer:str, target:Union[int, float]) -> None:
+        """Moves point p along the freedom vector until it has the value of target when projected on the projection_vector"""
+        assert zone_pointer in ["zp0", "zp1", "zp2"]
+        zp = self.gs[zone_pointer]
+        pos = target / self.orthogonal_projection(self.gs["freedom_vector"], self.gs["projection_vector"]) * self.gs["projection_vector"]
+        if zp == 0: self.twilight[point_index] = pos
+        else: self.g.fitted_x[point_index], self.g.fitted_y[point_index] = pos.components()
+
     def getGlyph(self, unicode:int):
         glyphIndex = self.cmap.subtable.getGlyphIndex(unicode)
         glyphOffset = self.loca[glyphIndex]
@@ -425,6 +424,20 @@ class Interpreter:
         # return bitmap
 
     def FU_to_px(self, v:Union[float, int]) -> float: return v * (self.fontsize * self.dpi) / (72 * self.head.unitsPerEM)
+    
+    def round(self, v:Union[int, float]) -> Union[int, float]:
+        """Period  is difference between two neighoring rounded values. Phase is the period offset from being 0 aligned. Threshold is how far into every period, values are rounded down. Beyond the threshold, they are rounded up. Since physical printing is not considered yet, engine compensation using color is not implemented."""
+        if self.gs["round_state"]: 
+            period, phase, threshold = self.gs["round_state"].values()
+            assert 3 >= period >= 0.5 and 1.5 > phase >= 0 and 11/8 * period >= threshold >= -3/8 * period, f"{period=}, {phase=}, {threshold=}"
+            v_original = v
+            v -= phase
+            v += period - threshold
+            v = v // period * period
+            v += phase
+            if v_original >= 0 and v < 0: v = 0 + (phase if phase <= period else phase - (phase // period * period)) # lowest positive rounded value
+            elif v_original < 0 and v >= 0: v = 0 - (phase if phase <= period else phase - (phase // period * period)) # highest negative rounded value
+        return v
 
     def orthogonal_projection(self, v1:vec2, v2:vec2) -> float:
         """
@@ -491,8 +504,41 @@ class Interpreter:
         elif name.startswith("PUSHB"): self._pop_IS(int(name[-3]) + 1)
         elif name.startswith("PUSHW"): self._pop_IS((int(name[-3]) + 1) * 2)
         ret = self._pop_IS()
-        # print(f"_next_instruction startin from {name}, returning {ret}. {name.startswith('PUSHW')}")
         return ret
+    
+    def _roundstate(self, n:int, gridPeriod:int=1) -> None:
+        """Decodes the last 8 bits in n to set the period, phase and threshold in roundstate. gridPeriod is mostly 1, only S45ROUND uses it."""
+        match n>>6:
+            case 0: period = gridPeriod/2
+            case 1: period = gridPeriod
+            case 2: period = gridPeriod*2
+            case _: raise NotImplementedError
+        match (n>>4) & 3:
+            case 0: phase = 0
+            case 1: phase = period / 4
+            case 2: phase = period / 2
+            case 3: phase = gridPeriod * 3/4
+            case _: raise NotImplementedError
+        match n & 0xF:
+            case 0: threshold = period - 1
+            case 1: threshold = -3/8 * period
+            case 2: threshold = -2/8 * period
+            case 3: threshold = -1/8 * period
+            case 4: threshold = 0
+            case 5: threshold = 1/8 * period
+            case 6: threshold = 2/8 * period
+            case 7: threshold = 3/8 * period
+            case 8: threshold = 4/8 * period
+            case 9: threshold = 5/8 * period
+            case 10: threshold = 6/8 * period
+            case 11: threshold = 7/8 * period
+            case 12: threshold = period
+            case 13: threshold = 9/8 * period
+            case 14: threshold = 10/8 * period
+            case 15: threshold = 11/8 * period
+            case _: raise NotImplementedError
+        self.gs["round_state"] = {"period": period, "phase": phase, "threshold": threshold}
+
 
     # ----------------------------------------------------------------#
     #                                                                 #
@@ -612,15 +658,15 @@ class Interpreter:
     def RTG(self):
         """
         Round To Grid
-        Sets the round_state in graphics state to 1. Distances are rounded to the closest grid line.
+        Distances are rounded to the closest grid line.
         """
-        self.gs["round_state"] = RoundState.RTG
+        self.gs["round_state"] = {"period": 1, "phase": 0, "threshold": 0.5}
     def RTHG(self):
         """
-        Round To Grid
-        Sets the round_state in graphics state to 0. Distances are rounded to the closest half grid line.
+        Round To Half rid
+        Distances are rounded to the closest half grid line.
         """
-        self.gs["round_state"] = RoundState.RTHG
+        self.gs["round_state"] = {"period": 1, "phase": 0.5, "threshold": 0.5}
     def SMD(self):
         """
         Set Minimum Distance
@@ -752,10 +798,26 @@ class Interpreter:
     def RTDG(self):
         """
         Round to Double Grid
-        Sets the round_state variable in the graphics state to 2. Distances are rounded to the closest half or integer pixel.
+        Distances are rounded to the closest half or integer pixel.
         """
-        self.gs["round_state"] = RoundState.RTDG
-    def MIAP(self, a): raise NotImplementedError
+        self.gs["round_state"] = {"period": 0.5, "phase": 0, "threshold": 0.25}
+
+    def MIAP(self, a):
+        """
+        Move Indirect Absolute Point
+        Pop n, then p from stack. Move point p along the freedom vector until, when projected onto the projection vector, it will have a value equal to cvt[n]. If a is 1, additionally consider control_value_cut_in and round the value before setting the point. For this, the coordinate of point p from the original outline, as projected on the projection vector is compared to cvt[n]. If the absolute difference between them is less than control value cut in, original coordinate is used to move the point p, else cvt[n]
+        """
+        assert self.gs["projection_vector"].dot(self.gs["freedom_vector"]) != 0
+        c, pi = self.cvt[uint32(self.pop())], uint32(self.pop())
+        if a:
+            p = self.get_point(pi, "zp0", "original")
+            coordinate = self.FU_to_px(self.orthogonal_projection(vec2(p.x, p.y), self.gs["projection_vector"]))
+            target = c if abs(coordinate - c) <= self.gs["control_value_cut"] else coordinate
+            v = self.round(target)
+            self.move(pi, "zp0", v)
+        else: self.move(pi, "zp0", c)
+        self.gs["rp0"] = self.gs["rp1"] = pi
+
     def NPUSHB(self):
         """
         PUSH N Bytes
@@ -928,8 +990,8 @@ class Interpreter:
         self.push(F26Dot6.to_bytes(-F26Dot6(self.pop())))
     def FLOOR(self): self.push(F26Dot6.to_bytes(math.floor(F26Dot6(self.pop()))))
     def CEILING(self): self.push(F26Dot6.to_bytes(math.ceil(F26Dot6(self.pop()))))
-    def ROUND(self, a): raise NotImplementedError
-    def NROUND(self, a): raise NotImplementedError
+    def ROUND(self, a): self.push(F26Dot6.to_bytes(self.round(F26Dot6(self.pop()))))
+    def NROUND(self, a): pass # skipped since no engine compensation is implemented
     def WCVTF(self):
         """Write Control Value Table in Funits"""
         v = uint32(self.pop()) # FUnits
@@ -939,13 +1001,29 @@ class Interpreter:
     def DELTAC1(self): raise NotImplementedError
     def DELTAC2(self): raise NotImplementedError
     def DELTAC3(self): raise NotImplementedError
-    def SROUND(self): raise NotImplementedError
-    def S45ROUND(self): raise NotImplementedError
+    def SROUND(self): 
+        """
+        Super Round
+        Pops n from stack to determine period, phase and threshold
+        """
+        self._roundstate(uint32(self.pop()), gridPeriod=1)
+    def S45ROUND(self):
+        """
+        Super Round 45 degrees
+        Measures using gridPeriod of sqrt(2) / 2 for measuring at 45 degree angles
+        """
+        self._roundstate(uint32(self.pop()), gridPeriod=math.sqrt(2) / 2)
     def JROT(self): raise NotImplementedError
     def JROF(self): raise NotImplementedError
-    def ROFF(self): self.gs["round_state"] = RoundState.OFF
-    def RUTG(self): self.gs["round_state"] = RoundState.RUTG
-    def RDTG(self): self.gs["round_state"] = RoundState.RDTG
+    def ROFF(self):
+        """(turn) Round OFF"""
+        self.gs["round_state"] = False
+    def RUTG(self):
+        """Round up to grid"""
+        self.gs["round_state"] = {"period": 1, "phase": 0, "threshold": 0.01}
+    def RDTG(self):
+        """Round down to grid"""
+        self.gs["round_state"] = {"period": 1, "phase": 0, "threshold": 0.99}
     def SANGW(self): raise NotImplementedError
     def AA(self): raise NotImplementedError
     def FLIPPT(self): raise NotImplementedError
