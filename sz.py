@@ -1,5 +1,5 @@
 if __name__ == "__main__":
-    files = ["table.py", "ttf.py", "vec.py"]
+    files = ["table.py", "ttf.py", "vec.py", "dtype.py", "op.py"]
     
     counts = [0] * len(files)
     for i, file in enumerate(files):

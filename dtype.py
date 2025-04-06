@@ -21,6 +21,7 @@ class DType:
             return ret
     def to_bytes(self, v): return int.to_bytes(int(self(v) * 2**self.fractional_bits), self.size, "big", signed=self.signed)
 
+int8 = DType("uint8", 1, 8, 0, True)
 uint8 = DType("uint8", 1, 8, 0, False)
 shortFrac = DType("shortFrac", 4, 32, 16, True)
 FWord = DType("FWord", 2, 16, 0, True)

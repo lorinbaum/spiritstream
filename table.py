@@ -1,5 +1,4 @@
 from dtype import *
-from helpers import *
 from typing import Union
 from vec import vec2
 import math
@@ -7,18 +6,17 @@ import math
 class Parser:
     def __init__(self, buffer:bytes):
         self.b = buffer
-        self.p = 0
-    def parse(self, dt:DType, count=1, offset=None) -> int: # dtype incorrect, should be Union[...] and include table
-        assert count >= 0
+        self.p = 0 # pointer
+    def parse(self, dt:DType, count:int=1, offset:int=None, **kwargs) -> int: # dtype incorrect, should be Union[...] and include table
+        assert count >= 0, f"Got invalid count {count}"
         if count == 0: return []
-        if offset: assert type(offset) in [list, tuple] and len(offset) == count
         ret = []
+        if offset: self.p = offset
         for i in range(count):
-            if offset: self.p = offset[i]
             if hasattr(dt, "size"): # dtypes have size, tables don't
                 ret.append(dt(self.b[self.p : self.p+dt.size]))
                 self.p += dt.size
-            else: ret.append(dt(self)) # pointer will still increment because all tables are made from dtypes and they have sizes
+            else: ret.append(dt(self, **kwargs))# self.p will still increment because all tables are made from dtypes and they have sizes. kwargs are needed for hmtx table
         return ret if len(ret) > 1 else ret[0]
 
 class Serializer:
@@ -101,17 +99,20 @@ class maxp_table(table):
         self.maxComponentDepth = b.parse(uint16)
 
 class cmap_table(table):
-    def _from_bytes(self, b:Parser):
+    def _from_bytes(self, b:Parser, length=None):
+        assert length != None
+        table_offset = b.p
         self.version = b.parse(uint16)
         self.numberSubtables = b.parse(uint16)
         self.encoding_subtables = b.parse(cmap_encoding_subtable, count=self.numberSubtables)
         # choose subtable
+        supported = [
+            [0,4], # unicode platform with unicode 2.0 and onwards semantics
+            [3,1] # windows platform with unicode BMP encoding
+        ]
         for ect in self.encoding_subtables:
-            if ect.platformID == 0 and ect.platformSpecificID == 4: # unicode platform with unicode 2.0 and onwards semantics
-                self.subtable = b.parse(cmap_subtable, offset=[ect.offset])
-                break
-            elif ect.platformID == 3 and ect.platformSpecificID == 1: # windows platform with unicode BMP encoding
-                self.subtable = b.parse(cmap_subtable, offset=[ect.offset])
+            if [ect.platformID, ect.platformSpecificID] in supported:
+                self.subtable = b.parse(cmap_subtable, offset=table_offset+ect.offset, table_offset=table_offset, length=length)
                 break
         assert hasattr(self, "subtable"), f"No supported subtable found. Available tables: {[(ect.platformID, ect.platformSpecificID) for ect in self.encoding_subtables]}"
     
@@ -122,10 +123,11 @@ class cmap_encoding_subtable(table):
         self.offset = b.parse(uint32)
 
 class cmap_subtable(table):
-    def _from_bytes(self, b:Parser):
+    def _from_bytes(self, b:Parser, table_offset=None, length=None):
         self.format = b.parse(uint16)
         match self.format:
             case 4:
+                assert length != None, "for cmap subtable format 4, length is required"
                 self.length = b.parse(uint16)
                 self.language = b.parse(uint16)
                 self.segCountX2 = b.parse(uint16)
@@ -143,14 +145,15 @@ class cmap_subtable(table):
                 self.startCode = b.parse(uint16, count=self.segCount)
                 self.idDelta = b.parse(int16, self.segCount)
                 self.idRangeOffset = b.parse(uint16, count=self.segCount)
-                self.glyphIdArray = b.parse(uint16, count=(len(b.b) - b.p)//2) # rest of the table is this stuff
+                self.glyphIdArray = b.parse(uint16, count=(table_offset + length - b.p)//2) # rest of the table is this stuff
 
                 def getGlyphIndex(unicode:int):
                     for i in range(self.segCount):
                         if unicode <= self.endCode[i]:
                             if self.startCode[i] <= unicode:
                                 glyphIndex = int((i + self.idRangeOffset[i] / 2 + (unicode - self.startCode[i])) - len(self.idRangeOffset))
-                                v = self.getGlyphIndex[glyphIndex]
+                                # v = self.getGlyphIndex[glyphIndex]
+                                v = self.glyphIdArray[glyphIndex]
                                 if v != 0: return (self.idDelta[i] + v) % 65536
                                 elif self.idRangeOffset[i] == 0: return (self.idDelta[i] + unicode) & 65536
                             return 0 # missing character glyph
@@ -168,7 +171,9 @@ class cmap_subtable(table):
                         if g.startCharCode <= unicode and g.endCharCode >= unicode:
                             return g.startGlyphCode + unicode - g.startCharCode
                 self.getGlyphIndex = getGlyphIndex
-            case _: raise NotImplementedError
+            case _:
+                print(self.format)
+                raise NotImplementedError
 
 class cmap_subtable12_group(table):
     def _from_bytes(self, b:Parser):
@@ -206,8 +211,9 @@ class longHorMetric(table):
 
 class glyf(table):
     class glyphPoint(vec2):
-        def __init__(self, x:int, y:int, onCurve:bool):
+        def __init__(self, x:int, y:int, onCurve:bool, touched:bool):
             self.onCurve = onCurve
+            self.touched = touched
             self.x, self.y = x, y
         def __repr__(self): return f"glyphPoint({self.x=}, {self.y=}, {self.onCurve=})"
     def _from_bytes(self, b:Parser):
@@ -219,7 +225,6 @@ class glyf(table):
         if self.numberOfContours > 0:
             self.endPtsContours = b.parse(uint16, count=self.numberOfContours)
             if type(self.endPtsContours) != list: self.endPtsContours = [self.endPtsContours]
-            print(f"{self.endPtsContours=}")
             self.instructionLength = b.parse(uint16)
             self.instructions = b.parse(uint8, count=self.instructionLength)
             self.flags = [None] * (self.endPtsContours[-1] + 1)
@@ -260,9 +265,8 @@ class glyf(table):
         elif self.numberOfContours < 0: raise NotImplementedError("Compound glyph")
     
     def get_point(self, i:int, outline:str="original") -> glyphPoint:
-        assert outline in ["original", "scaled", "fitted"]
-        if outline == "original": x, y = self.x, self.y
-        elif outline == "scaled": x, y = self.scaled_x, self.scaled_y
+        assert outline in ["original", "fitted"]
+        if outline == "original": x, y = self.scaled_x, self.scaled_y
         else: x,y = self.fitted_x, self.fitted_y
         assert len(x) > i >= 0, f"Error: invalid index {i=}"
-        return self.glyphPoint(x[i], y[i], bool(self.flags[i] & 0x1) if i < len(self.flags) else False) # False is returned for phantom points
+        return self.glyphPoint(x[i], y[i], bool(self.flags[i] & 0x01) if i < len(self.flags) else False, self.touched[i]) # onCurve is always False for phantom points
