@@ -728,34 +728,34 @@ class TestTTFOps(unittest.TestCase):
     def test_DEBUG(self): pass
     def test_LT(self):
         for i1, i2 in zip(self.inputs, self.inputs[1:]):
-            self.I.stack, self.I.sp = list(map(uint32.to_bytes, (i1, i2))), 2
+            self.I.stack, self.I.sp = list(map(int32.to_bytes, (i1, i2))), 2
             self.I.run("LT")
-            self.assertEqual(self.I.stack[0], uint32.to_bytes(int(uint32(i1) < uint32(i2))))
+            self.assertEqual(self.I.stack[0], int32.to_bytes(int(int32(i1) < int32(i2))))
     def test_LTEQ(self):
         for i1, i2 in zip(self.inputs, self.inputs[1:]):
-            self.I.stack, self.I.sp = list(map(uint32.to_bytes, (i1, i2))), 2
+            self.I.stack, self.I.sp = list(map(int32.to_bytes, (i1, i2))), 2
             self.I.run("LTEQ")
-            self.assertEqual(self.I.stack[0], uint32.to_bytes(int(uint32(i1) <= uint32(i2))))
+            self.assertEqual(self.I.stack[0], int32.to_bytes(int(int32(i1) <= int32(i2))))
     def test_GT(self):
         for i1, i2 in zip(self.inputs, self.inputs[1:]):
-            self.I.stack, self.I.sp = list(map(uint32.to_bytes, (i1, i2))), 2
+            self.I.stack, self.I.sp = list(map(int32.to_bytes, (i1, i2))), 2
             self.I.run("GT")
-            self.assertEqual(self.I.stack[0], uint32.to_bytes(int(uint32(i1) > uint32(i2))))
+            self.assertEqual(self.I.stack[0], int32.to_bytes(int(int32(i1) > int32(i2))))
     def test_GTEQ(self):
         for i1, i2 in zip(self.inputs, self.inputs[1:]):
-            self.I.stack, self.I.sp = list(map(uint32.to_bytes, (i1, i2))), 2
+            self.I.stack, self.I.sp = list(map(int32.to_bytes, (i1, i2))), 2
             self.I.run("GTEQ")
-            self.assertEqual(self.I.stack[0], uint32.to_bytes(int(uint32(i1) >= uint32(i2))))
+            self.assertEqual(self.I.stack[0], int32.to_bytes(int(int32(i1) >= int32(i2))))
     def test_EQ(self):
         for i1, i2 in zip(self.inputs, self.inputs[1:]):
-            self.I.stack, self.I.sp = list(map(uint32.to_bytes, (i1, i2))), 2
+            self.I.stack, self.I.sp = list(map(int32.to_bytes, (i1, i2))), 2
             self.I.run("EQ")
-            self.assertEqual(self.I.stack[0], uint32.to_bytes(int(uint32(i1) == uint32(i2))))
+            self.assertEqual(self.I.stack[0], int32.to_bytes(int(int32(i1) == int32(i2))))
     def test_NEQ(self): 
         for i1, i2 in zip(self.inputs, self.inputs[1:]):
-            self.I.stack, self.I.sp = list(map(uint32.to_bytes, (i1, i2))), 2
+            self.I.stack, self.I.sp = list(map(int32.to_bytes, (i1, i2))), 2
             self.I.run("NEQ")
-            self.assertEqual(self.I.stack[0], uint32.to_bytes(int(uint32(i1) != uint32(i2))))
+            self.assertEqual(self.I.stack[0], int32.to_bytes(int(int32(i1) != int32(i2))))
     # def test_ODD(self): pass
     # def test_EVEN(self): pass
     def test_AND(self):
