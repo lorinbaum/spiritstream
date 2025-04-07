@@ -149,6 +149,8 @@ class Interpreter:
         if self.head.flags & 2: assert self.g.xMin == leftSideBearing
         self.g.x += [leftSideBearing, leftSideBearing + advanceWidth]
         self.g.y += [baseline, baseline]
+
+        if self.head.flags & 2: self.g.x = [x - leftSideBearing for x in self.g.x] # this flag means left size bearing should be aligned with x = 0
         
         self.g.scaled_x, self.g.scaled_y = list(map(lambda v: [ops.FU_to_px(self, v0) for v0 in v], [self.g.x, self.g.y])) # convert Funits to pixels
         self.g.fitted_x, self.g.fitted_y = self.g.scaled_x.copy(), self.g.scaled_y.copy()
@@ -164,5 +166,7 @@ class Interpreter:
     def print_debug(self, op:str, v:bytes=None):
         _, ip = self.callstack[-1].values()
         depth = len(self.callstack)-1
-        if op in ["PUSH", "POP"]: print(f"{'|   ' * depth}{op:4s}:[{self.sp:4}]{' 0x'+v.hex() if v != None else ''}")
-        else: print(f"{'|   ' * depth}{ip} {op}{' 0x'+v.hex() if v != None else ''}")
+        if op not in ["PUSH", "POP"]:
+            pretext = f"{'|   ' * depth}{ip:4} {op}"
+            stacktext = f"{['0x'+v.hex() for v in self.stack[:self.sp]]}, "
+            print(f"{pretext:50} {stacktext}")

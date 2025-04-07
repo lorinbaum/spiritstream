@@ -21,9 +21,7 @@ def move(I:"ttf.Interpreter", point_index:int, zone_pointer:str, coordinate:Unio
         pos = p + (coordinate-current_coordinate) / orthogonal_projection(I.gs["freedom_vector"], I.gs["projection_vector"]) * I.gs["freedom_vector"]
     elif coordinate == None and x != None and y != None: pos = vec2(x, y)
     else: raise AssertionError(f"Either coordinate or x and y must be defined, got {coordinate=}, {x=}, {y=}")
-    if zp == 0:
-        I.twilight[point_index] = pos
-        # print(f"MOVE to {pos=} {'directly' if x != None else 'indirectly'}")
+    if zp == 0: I.twilight[point_index] = pos
     else:
         I.g.touched[point_index] = True
         I.g.fitted_x[point_index], I.g.fitted_y[point_index] = pos.components()
@@ -35,11 +33,9 @@ def MDAP(I:"ttf.Interpreter", a):
     """Move Direct Absolute Point"""
     pi = uint32(pop(I))
     if a:
-        # raise NotImplementedError
         p = I.get_point(pi, "zp0", "fitted")
         coordinate = orthogonal_projection(vec2(p.x, p.y), I.gs["projection_vector"])
         move(I, pi, "zp0", _round(I, coordinate))
-    # print(f"MDAP: setting rp0 to {pi=}")
     I.gs["rp0"] = I.gs["rp1"] = pi
     if I.gs["zp0"] == 1: I.g.touched[pi] = True
 def UTP(I:"ttf.Interpreter"): raise NotImplementedError
@@ -53,7 +49,6 @@ def IUP(I:"ttf.Interpreter", a):
     IUP does not "touch" the points it moves.
     """
     # raise NotImplementedError
-    print("IUP")
     assert I.gs["zp2"] == 1, "zp2 must be set to 1 before IUP instruction. IUP in twilight zone unsupported"
     start = 0
     for ep in I.g.endPtsContours:
@@ -65,9 +60,7 @@ def IUP(I:"ttf.Interpreter", a):
                 mi = min(p1, p2, p3)
                 mx = max(p1, p2, p3)
                 if mi == mx: continue
-                print("hamdilon")
                 if mx > p2 > mi: # p2 between the two points
-                    print("hamedi is comgin")
                     p1, p2, p3 = [(p - mi) / (mx - mi) for p in [p1, p2, p3]] # normalize
                     # get points after fitting and move p2 to maintain ratio
                     p1n, p3n = I.get_point(i-1, "zp2", "fitted"), I.get_point(i+1, "zp2", "fitted") 
@@ -75,7 +68,6 @@ def IUP(I:"ttf.Interpreter", a):
                     new_c = (p3n + (p1n - p3n) * p2) if p1 > p3 else (p1n + (p3n - p1n) * p2)
                     x, y = (new_c, p2y) if a else (p2x, new_c)
                 else:
-                    print("hamedi is coming 2 you")
                     closest_point_index = i-1 if abs(p1-p2) < abs(p3-p2) else i+1
                     closest_point_index %= len(pts) - 2 # -2 for the two duplicated points
                     # get difference before and after fitting
@@ -98,7 +90,6 @@ def SHPIX(I:"ttf.Interpreter"):
     for _ in range(I.gs["loop"]):
         pi = uint32(pop(I))
         np = I.get_point(pi, "zp2", "fitted")
-        # print(f"SHPIX moving point {pi} in {'glyph' if I.gs['zp2'] else 'twilight'} by {I.gs['freedom_vector'] * d}")
         np = vec2(np.x, np.y) + I.gs["freedom_vector"] * d
         move(I, pi, "zp2", x=np.x, y=np.y)
     I.gs["loop"] = 1
@@ -113,7 +104,6 @@ def ALIGNRP(I:"ttf.Interpreter"):
     rp0_coord = orthogonal_projection(vec2(rp0.x, rp0.y), I.gs["projection_vector"])
     assert I.gs["loop"] > 0
     for _ in range(I.gs["loop"]):
-        # print(f"ALIGNRP moving point {pi} in {'glyph' if I.gs['zp1'] else 'twilight'} to {rp0.x}, {rp0.y} along {I.gs['projection_vector']}")
         move(I, uint32(pop(I)), "zp1", rp0_coord)
     I.gs["loop"] = 1
 def MIAP(I:"ttf.Interpreter", a):
@@ -131,8 +121,6 @@ def MIAP(I:"ttf.Interpreter", a):
         v = _round(I, target)
         move(I, pi, "zp0", v)
     else: move(I, pi, "zp0", c)
-    print(f"MIAP moving point {pi} in {'glyph' if I.gs['zp0'] else 'twilight'} to {c * I.gs['projection_vector']}")
-    # print(f"MIAP: setting rp0 to {pi=}, created point at {c=} in zone {I.gs['zp0']}")
     I.gs["rp0"] = I.gs["rp1"] = pi
 def GC(I:"ttf.Interpreter", a):
     """Get Coordinate projected onto the projection vector"""
@@ -352,12 +340,12 @@ def CEILING(I:"ttf.Interpreter"): push(I, F26Dot6.to_bytes(math.ceil(F26Dot6(pop
 
 """BOOLEAN OPS"""
 
-def LT(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(uint32(pop(I)) > uint32(pop(I)))))
-def LTEQ(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(uint32(pop(I)) >= uint32(pop(I)))))
-def GT(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(uint32(pop(I)) < uint32(pop(I)))))
-def GTEQ(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(uint32(pop(I)) <= uint32(pop(I)))))
-def EQ(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(uint32(pop(I)) == uint32(pop(I)))))
-def NEQ(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(uint32(pop(I)) != uint32(pop(I)))))
+def LT(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(int32(pop(I)) > int32(pop(I)))))
+def LTEQ(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(int32(pop(I)) >= int32(pop(I)))))
+def GT(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(int32(pop(I)) < int32(pop(I)))))
+def GTEQ(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(int32(pop(I)) <= int32(pop(I)))))
+def EQ(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(int32(pop(I)) == int32(pop(I)))))
+def NEQ(I:"ttf.Interpreter"): push(I, uint32.to_bytes(int(int32(pop(I)) != int32(pop(I)))))
 # for ANd and OR, popping values first is necessary because python and or can sometimes evaluate after only the first value. like False and True returns False before True was looked at.
 def AND(I:"ttf.Interpreter"):
     v1, v2 = uint32(pop(I)), uint32(pop(I))
