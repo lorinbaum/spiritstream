@@ -519,7 +519,110 @@ class TestTTFOps(unittest.TestCase):
             self.assertEqual(self.I.g.touched[0], True)
             
 
-    # def test_IUP(self): pass TODO
+    def test_IUP(self):
+        self.I.g = glyf()
+
+        # IUP1 with point between other ones
+        self.I.g.scaled_x = [0, 2, 5]
+        self.I.g.scaled_y = [0, 0, 0]
+        self.I.g.fitted_x = [1, 2, 11]
+        self.I.g.fitted_y = [0, 0, 0]
+        self.I.g.touched = [True, False, True]
+        self.I.g.endPtsContours = [2]
+        self.I.gs = {"zp2": 1}
+        self.I.run("IUP1")
+        self.assertEqual(self.I.g.touched, [True, False, True]) # unchanged
+        self.assertEqual(self.I.g.fitted_x, [1, 5, 11])
+
+        # wrong zone
+        self.I.gs = {"zp2": 0}
+        with self.assertRaises(AssertionError): self.I.run("IUP1")
+
+        # IUP0 with point between other ones
+        self.I.g.scaled_x = [0, 0, 0]
+        self.I.g.scaled_y = [0, 2, 5]
+        self.I.g.fitted_x = [0, 0, 0]
+        self.I.g.fitted_y = [0, 2, 10]
+        self.I.g.touched = [True, False, True]
+        self.I.g.endPtsContours = [2]
+        self.I.gs = {"zp2": 1}
+        self.I.run("IUP0")
+        self.assertEqual(self.I.g.touched, [True, False, True]) # unchanged
+        self.assertEqual(self.I.g.fitted_y, [0, 4, 10])
+
+        # IUP0 with three points, the one to move at the beginning
+        self.I.g.scaled_x = [0, 0, 0]
+        self.I.g.scaled_y = [2, 5, 0]
+        self.I.g.fitted_x = [0, 0, 0]
+        self.I.g.fitted_y = [2, 10, 0]
+        self.I.g.touched = [False, True, True]
+        self.I.g.endPtsContours = [2]
+        self.I.gs = {"zp2": 1}
+        self.I.run("IUP0")
+        self.assertEqual(self.I.g.touched, [False, True, True]) # unchanged
+        self.assertEqual(self.I.g.fitted_y, [4, 10, 0])
+
+        # IUP0 with three points, the one to move at the end
+        self.I.g.scaled_x = [0, 0, 0]
+        self.I.g.scaled_y = [5, 0, 2]
+        self.I.g.fitted_x = [0, 0, 0]
+        self.I.g.fitted_y = [10, 0, 2]
+        self.I.g.touched = [True, True, False]
+        self.I.g.endPtsContours = [2]
+        self.I.gs = {"zp2": 1}
+        self.I.run("IUP0")
+        self.assertEqual(self.I.g.touched, [True, True, False]) # unchanged
+        self.assertEqual(self.I.g.fitted_y, [10, 0, 4])
+
+        # IUP0 with two points (= point to move not between)
+        self.I.g.scaled_x = [0, 0]
+        self.I.g.scaled_y = [0, 2]
+        self.I.g.fitted_x = [0, 0]
+        self.I.g.fitted_y = [0, 4]
+        self.I.g.touched = [False, True]
+        self.I.g.endPtsContours = [1]
+        self.I.gs = {"zp2": 1}
+        self.I.run("IUP0")
+        self.assertEqual(self.I.g.touched, [False, True]) # unchanged
+        self.assertEqual(self.I.g.fitted_y, [2, 4])
+
+        # IUP1 with many points, between and not between
+        self.I.g.scaled_x = [0, 5,  7, 3, -5]
+        self.I.g.scaled_y = [0, 0,  8, 5,  1]
+        self.I.g.fitted_x = [0, 5, 14, 4, -5]
+        self.I.g.fitted_y = [1, 0,  5, 5,  1]
+        self.I.g.touched = [True, False, True, True, False]
+        self.I.g.endPtsContours = [4]
+        self.I.gs = {"zp2": 1}
+        self.I.run("IUP1")
+        self.assertEqual(self.I.g.touched, [True, False, True, True, False]) # unchanged
+        self.assertEqual(self.I.g.fitted_x, [0, 10, 14, 4, -5])
+        self.assertEqual(self.I.g.fitted_y, [1,  0,  5, 5,  1]) # unchanged
+
+        # IUP0 with nothing to move
+        self.I.g.scaled_x = [0, 0, 0, 0]
+        self.I.g.scaled_y = [0, 2, 5, 1]
+        self.I.g.fitted_x = [0, 0, 0, 0,]
+        self.I.g.fitted_y = [0, 2, 10, 2]
+        self.I.g.touched = [False, False, True, True]
+        self.I.g.endPtsContours = [2]
+        self.I.gs = {"zp2": 1}
+        self.I.run("IUP0")
+        self.assertEqual(self.I.g.touched, [False, False, True, True]) # unchanged
+        self.assertEqual(self.I.g.fitted_y, [0, 2, 10, 2]) # unchanged
+
+        # IUP0 with multiple contours between and not between
+        self.I.g.scaled_x = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+        self.I.g.scaled_y = [0, 2, 5, 7, 1, 2, 0, 2, 5]
+        self.I.g.fitted_x = [0, 0, 0, 0, 1, 0, 0, 0, 0]
+        self.I.g.fitted_y = [1, 2, 11, 7, 1, 3, 1, 2, 11]
+        self.I.g.touched = [True, False, True, False, True, True, True, False, True]
+        self.I.g.endPtsContours = [2, 5, 8]
+        self.I.gs = {"zp2": 1}
+        self.I.run("IUP0")
+        self.assertEqual(self.I.g.touched, [True, False, True, False, True, True, True, False, True]) # unchanged
+        self.assertEqual(self.I.g.fitted_y, [1, 5, 11, 8, 1, 3, 1, 5, 11])
+
     # def test_SHP(self): pass
     # def test_SHC(self): pass
     # def test_SHZ(self): pass

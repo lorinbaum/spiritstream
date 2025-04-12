@@ -11,10 +11,10 @@ import ttf
 def FU_to_px(I:"ttf.Interpreter", v:Union[float, int]) -> float: return v * (I.fontsize * I.dpi) / (72 * I.head.unitsPerEM)
 def move(I:"ttf.Interpreter", point_index:int, zone_pointer:str, coordinate:Union[int, float]=None, x=None, y=None) -> None:
     """If coordinate is set, moves point p along the freedom vector until it has the value of coordinate when projected on the projection_vector. If coordinate is not set, moves p to x,y."""
-    assert I.gs["projection_vector"].dot(I.gs["freedom_vector"]) != 0
     assert zone_pointer in ["zp0", "zp1", "zp2"]
     zp = I.gs[zone_pointer]
     if coordinate != None and x == y == None:
+        assert I.gs["projection_vector"].dot(I.gs["freedom_vector"]) != 0
         p = I.get_point(point_index, zone_pointer, "fitted")
         p = vec2(p.x, p.y)
         current_coordinate = orthogonal_projection(p, I.gs["projection_vector"])
@@ -55,6 +55,7 @@ def IUP(I:"ttf.Interpreter", a):
         pts = [I.get_point(i, "zp2", "original") for i in [ep] + list(range(start, ep + 1)) + [start]] # add last and first points to allow full detection of a 3 element pattern
         for i, (p1, p2, p3) in enumerate(zip(pts, pts[1:], pts[2:])):
             if p1.touched and not p2.touched and p3.touched:
+                point_index = i + start # middle point (p2)
                 p2x, p2y = p2.x, p2.y # storing original data
                 p1, p2, p3 = (p1.x, p2.x, p3.x) if a else (p1.y, p2.y, p3.y) # get relevant coordinate data only
                 mi = min(p1, p2, p3)
@@ -63,19 +64,22 @@ def IUP(I:"ttf.Interpreter", a):
                 if mx > p2 > mi: # p2 between the two points
                     p1, p2, p3 = [(p - mi) / (mx - mi) for p in [p1, p2, p3]] # normalize
                     # get points after fitting and move p2 to maintain ratio
-                    p1n, p3n = I.get_point(i-1, "zp2", "fitted"), I.get_point(i+1, "zp2", "fitted") 
+                    p1_index = point_index - 1 if point_index > start else ep
+                    p3_index = point_index + 1 if point_index < ep else start
+                    p1n, p3n = I.get_point(p1_index, "zp2", "fitted"), I.get_point(p3_index, "zp2", "fitted") 
                     p1n, p3n = (p1n.x, p3n.x) if a else (p1n.y, p3n.y) # get relevant coordinate data only
                     new_c = (p3n + (p1n - p3n) * p2) if p1 > p3 else (p1n + (p3n - p1n) * p2)
                     x, y = (new_c, p2y) if a else (p2x, new_c)
                 else:
                     closest_point_index = i-1 if abs(p1-p2) < abs(p3-p2) else i+1
                     closest_point_index %= len(pts) - 2 # -2 for the two duplicated points
+                    closest_point_index += start
                     # get difference before and after fitting
                     before = I.get_point(closest_point_index, "zp2", "original")
                     after = I.get_point(closest_point_index, "zp2", "fitted")
                     x, y = (p2x + (after.x - before.x), p2y) if a else (p2x, p2y + (after.y - before.y))
-                move(I, i, "zp2", x=x, y=y)
-                I.g.touched[i] = False # untouch after move. IUP does not touch
+                move(I, point_index, "zp2", x=x, y=y)
+                I.g.touched[point_index] = False # untouch after move. IUP does not touch
         start = ep + 1
 def SHP(I:"ttf.Interpreter", a): raise NotImplementedError
 def SHC(I:"ttf.Interpreter", a): raise NotImplementedError
@@ -207,8 +211,7 @@ Writing instruction pops value first, then index. Indices must not exceed maxSto
 """
 def WS(I:"ttf.Interpreter"):
     """Write Store"""
-    v = int32(pop(I))
-    assert v >= 0, f"{v=}"
+    v = int32(pop(I)) # parsing as uint as the spec would demand, then rendering G in Fira Code produces insane, large values
     assert 0 <= (i:=uint32(pop(I))) < I.maxp.maxStorage
     I.storage[i] = v
 def RS(I:"ttf.Interpreter"):
@@ -463,11 +466,9 @@ def AA(I:"ttf.Interpreter"): raise NotImplementedError
 def FLIPPT(I:"ttf.Interpreter"): raise NotImplementedError
 def FLIPRGON(I:"ttf.Interpreter"): raise NotImplementedError
 def FLIPRGOFF(I:"ttf.Interpreter"): raise NotImplementedError
-def SCANCTRL(I:"ttf.Interpreter"): # probably just set the value of scan_control and interpret the bits when starting scan converter
+def SCANCTRL(I:"ttf.Interpreter"):
     """Scan conversion control"""
-    pop(I)
-    I.gs["scan_control"] = True
-    # I.gs["scan_control"] = Euint16(pop(I))
+    I.gs["scan_control"] = Euint16(pop(I))
 def SDPVTL(I:"ttf.Interpreter", a): raise NotImplementedError
 def GETINFO(I:"ttf.Interpreter"):
     i = uint32(pop(I))
