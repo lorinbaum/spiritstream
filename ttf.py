@@ -250,7 +250,6 @@ class Interpreter:
         Uses the non-zero winding number rule, which means: for each pixel, go right and on each intersection with any contour segment, determine the gradient at that point. if the gradient points up, add 1, else sub 1. If the result is zero, the point is outside, else, its inside
         """
         pts = [self.g.get_point(i, "fitted") for i in range(self.g.endPtsContours[-1] + 1)] if self.g.endPtsContours != [] else [glyf.glyphPoint(0, 0, False)] # default 0 to return a bitmap of 0
-        # pts = [glyf.glyphPoint(F26Dot6(p.x), F26Dot6(p.y), p.onCurve) for p in pts] # round to nearest 64th
         maxX, minX = max(pts, key=lambda p: p.x).x, min(pts, key=lambda p: p.x).x
         maxY, minY = max(pts, key=lambda p: p.y).y, min(pts, key=lambda p: p.y).y
         width = math.ceil(maxX - minX)
@@ -263,7 +262,6 @@ class Interpreter:
         for ep in self.g.endPtsContours:
             this_contour = []
             contour = pts[start:ep+1]
-            # print("contour:", contour)
             for p1, p2 in zip(contour, contour[1:] + [contour[0]]):
                 this_contour.append(p1)
                 if p1.onCurve == p2.onCurve: this_contour.append(self.g.glyphPoint(p1.x + (p2.x-p1.x)/2, p1.y + (p2.y-p1.y) / 2, True)) # add another point inbetween. if two consecutive offcurve points, add an oncurve one to keep the curves quadratic. if two oncurve ones, add one so the segments are always 3 points: easy to handle.
@@ -271,7 +269,6 @@ class Interpreter:
             this_contour.append(contour[0])
             assert len(this_contour) % 2 == 1
             all_contours.append(this_contour)
-        # [print(i, p) for c in all_contours for i, p in enumerate(c)]
         for row in range(height):
             y = row + 0.5
             intersections = []
@@ -289,18 +286,13 @@ class Interpreter:
                             direction_on_contour = m * (-1 if p2.x - p0.x < 0 else 1)
                             b = p2.y - (m * p2.x)
                             x = (y - b) / m # TODO: division by 0 error
-                            # if [isect["x"] for isect in intersections if math.isclose(isect["x"], x)] == []:
-                            #     intersections.append({"x": x, "winding_number": -1 if direction_on_contour < 0 else 1, "source": "linear"})
                             if not math.isclose(x, p0.x, rel_tol=1e-9) and not (math.isclose(y, p0.y, rel_tol=1e-9)) or [isect["x"] for isect in intersections if math.isclose(isect["x"], x) and isect["winding_number"] == (-1 if direction_on_contour < 0 else 1)] == []: intersections.append({"x": x, "winding_number": -1 if direction_on_contour < 0 else 1, "source": "linear"})
                     else: # actual quadratic bezier curve.
                         p0, p1, p2 = map(lambda p: vec2(p.x, p.y), (p0, p1, p2)) # convert to vectors
                         y0, y1, y2 = map(lambda p: p.y-y, (p0, p1, p2)) # shifted down so I can pretend that the x I'm interested in is at y = 0, which is necessary for using quadratic equation
                         ts = quadratic_equation(y0 - 2*y1 + y2, 2*(y1 - y0), y0)
-                        # if row == 9 and  i == 16: print(ts, "from", y0, y1, y2)
                         ts = [t for t in ts if 1 >= t >= 0] if ts != None else []
-                        if len(ts) == 0: continue
                         for t in ts:
-                            # if row == 9: print(i, t)
                             p = (((1-t)**2)*p0 + 2*(1-t)*t*p1 + (t**2)*p2)
                             x = p.x
                             gradient = 2*(1-t) * (p1-p0) + 2*t*(p2 - p1)
@@ -310,7 +302,6 @@ class Interpreter:
             for column in range(width):
                 x = column + 0.5
                 relevant_intersections = [i for i in intersections if i["x"] >= x]
-                # if row == 27 and column == 0: print(intersections, relevant_intersections, sep="||")
                 bitmap[height - row - 1][column] = 1 if sum([i["winding_number"] for i in relevant_intersections]) != 0 else 0
         return bitmap
     
