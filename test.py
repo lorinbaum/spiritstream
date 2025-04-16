@@ -624,7 +624,40 @@ class TestTTFOps(unittest.TestCase):
         self.assertEqual(self.I.g.fitted_y, [1, 5, 11, 8, 1, 3, 1, 5, 11])
 
     # def test_SHP(self): pass
-    # def test_SHC(self): pass
+    def test_SHC(self):
+        self.I.g = glyf()
+        self.I.gs = {"zp2": 1, "zp0": 1, "rp1": 4, "freedom_vector": vec2(0, 1), "projection_vector": vec2(0,1)}
+        
+        # test with reference point outside of contour to be moved
+        for i in range(4): # should work for any of these indices since they all point to the same contour
+            self.I.g.scaled_x = [0, 2, 2, 0, 5, 6, 5]
+            self.I.g.scaled_y = [0, 0, 2, 2, 5, 6, 7]
+            self.I.g.endPtsContours = [3, 6]
+            self.I.g.fitted_x = [0, 2, 2, 0, 6, 7, 6]
+            self.I.g.fitted_y = [0, 0, 2, 2, 6, 7, 8]
+            self.I.g.touched = [False, False, False, False, True, True, True]
+            self.I.stack = uint32_stack([i])
+            self.I.sp = 1
+            self.I.run("SHC1")
+            self.assertEqual(self.I.g.fitted_x, [0, 2, 2, 0, 6, 7, 6])
+            self.assertEqual(self.I.g.fitted_y, [1, 1, 3, 3, 6, 7, 8])
+            self.assertEqual(self.I.sp, 0)
+            self.assertEqual(self.I.g.touched, [True] * 7)
+        # test with reference point inside contour to be moved
+        self.I.g.scaled_x = [0, 2, 2, 0, 5, 6, 5]
+        self.I.g.scaled_y = [0, 0, 2, 2, 5, 6, 7]
+        self.I.g.endPtsContours = [3, 6]
+        self.I.g.fitted_x = [0, 2, 2, 0, 6, 7, 6]
+        self.I.g.fitted_y = [0, 0, 2, 2, 6, 7, 8]
+        self.I.g.touched = [False, False, False, False, True, True, True]
+        self.I.stack = uint32_stack([4])
+        self.I.sp = 1
+        self.I.run("SHC1")
+        self.assertEqual(self.I.g.fitted_x, [0, 2, 2, 0, 6, 7, 6])
+        self.assertEqual(self.I.g.fitted_y, [0, 0, 2, 2, 6, 8, 9])
+        self.assertEqual(self.I.sp, 0)
+        self.assertEqual(self.I.g.touched, [False, False, False, False, True, True, True])
+
     # def test_SHZ(self): pass
     def test_SHPIX(self):
         fvs = [vec2(1,1), vec2(0.5, 5), vec2(-1, 0), vec2(-19, 0.1)]

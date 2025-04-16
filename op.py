@@ -82,7 +82,37 @@ def IUP(I:"ttf.Interpreter", a):
                 I.g.touched[point_index] = False # untouch after move. IUP does not touch
         start = ep + 1
 def SHP(I:"ttf.Interpreter", a): raise NotImplementedError
-def SHC(I:"ttf.Interpreter", a): raise NotImplementedError
+def SHC(I:"ttf.Interpreter", a):
+    """
+    Shift contour by the last point
+    Shifts contour c in zone zp2 (I'm assuming the contour that point c is on) by how how much the reference point has been shifted. if a == 0 that's rp2 in zp1, if a == 1 it's rp1 in zp0
+    """
+    assert I.gs["zp2"] == 1, "Unsure what to do in SHC instruction in twilight zone"
+    assert a in [0,1]
+    rp = I.gs["rp2"] if a == 0 else I.gs["rp1"]
+    zone = "zp1" if a == 0 else "zp0"
+    original_point = I.get_point(rp, zone, "original")
+    moved_point = I.get_point(rp, zone, "fitted")
+    d1 = orthogonal_projection(vec2(original_point.x, original_point.y), I.gs["projection_vector"])
+    d2 = orthogonal_projection(vec2(moved_point.x, moved_point.y), I.gs["projection_vector"])
+    d = d2 - d1
+    c = uint32(pop(I))
+    assert c < I.g.endPtsContours[-1] + 1
+    start = 0
+    for ep in I.g.endPtsContours:
+        if start <= c <= ep:
+            contour = list(range(start, ep+1))
+            break
+        start = ep + 1
+    assert contour != None
+    for pi in contour:
+        if I.gs[zone] == 1 and rp == pi: continue # skip reference point if in contour c
+        p = I.get_point(pi, "zp2", "fitted")
+        coordinate = orthogonal_projection(vec2(p.x, p.y), I.gs["projection_vector"])
+        # print(f"SHC{a} moving {pi} as part of contour ({len(contour)=}) in {I.gs['zp2']} by {d} to coordinate {coordinate + d} given {I.gs['projection_vector']} and point . Point stayed the same = {(p.x, p.y) == ((pnew:=I.get_point(pi, zone, 'fitted')).x, pnew.y)}")
+        # print("|   original point:", p.x, p.y, "confirmation", (npoint:=I.get_point(pi, "zp2", "fitted")).x, npoint.y)
+        move(I, pi, "zp2", coordinate + d)
+    
 def SHZ(I:"ttf.Interpreter", a): raise NotImplementedError
 def SHPIX(I:"ttf.Interpreter"):
     """
@@ -108,7 +138,9 @@ def ALIGNRP(I:"ttf.Interpreter"):
     rp0_coord = orthogonal_projection(vec2(rp0.x, rp0.y), I.gs["projection_vector"])
     assert I.gs["loop"] > 0
     for _ in range(I.gs["loop"]):
-        move(I, uint32(pop(I)), "zp1", rp0_coord)
+        pi = uint32(pop(I))
+        # print(f"ALIGNRP moving {pi} in {I.gs['zp1']} to coordinate of point {I.gs['rp0']}: {rp0_coord}")
+        move(I, pi, "zp1", rp0_coord)
     I.gs["loop"] = 1
 def MIAP(I:"ttf.Interpreter", a):
     """
@@ -212,6 +244,7 @@ Writing instruction pops value first, then index. Indices must not exceed maxSto
 def WS(I:"ttf.Interpreter"):
     """Write Store"""
     v = int32(pop(I)) # parsing as uint as the spec would demand, then rendering G in Fira Code produces insane, large values
+    # if v < 0: v = -v # doing this is fine though?
     assert 0 <= (i:=uint32(pop(I))) < I.maxp.maxStorage
     I.storage[i] = v
 def RS(I:"ttf.Interpreter"):

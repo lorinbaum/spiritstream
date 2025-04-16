@@ -14,6 +14,7 @@ class Parser:
         if offset: self.p = offset
         for i in range(count):
             if hasattr(dt, "size"): # dtypes have size, tables don't
+                assert len(self.b) >= self.p + dt.size
                 ret.append(dt(self.b[self.p : self.p+dt.size]))
                 self.p += dt.size
             else: ret.append(dt(self, **kwargs))# self.p will still increment because all tables are made from dtypes and they have sizes. kwargs are needed for hmtx table
@@ -156,7 +157,7 @@ class cmap_subtable(table):
                                 v = self.glyphIdArray[glyphIndex]
                                 if v != 0: return (self.idDelta[i] + v) % 65536
                                 elif self.idRangeOffset[i] == 0: return (self.idDelta[i] + unicode) & 65536
-                            return 0 # missing character glyph
+                    return 0 # missing character glyph
                 self.getGlyphIndex = getGlyphIndex
 
             case 12:
@@ -170,6 +171,7 @@ class cmap_subtable(table):
                     for g in self.groups:
                         if g.startCharCode <= unicode and g.endCharCode >= unicode:
                             return g.startGlyphCode + unicode - g.startCharCode
+                    return 0 # missing characer glyph
                 self.getGlyphIndex = getGlyphIndex
             case _:
                 print(self.format)
@@ -211,58 +213,79 @@ class longHorMetric(table):
 
 class glyf(table):
     class glyphPoint(vec2):
-        def __init__(self, x:int, y:int, onCurve:bool, touched:bool):
+        def __init__(self, x:int, y:int, onCurve:bool, touched:bool=False):
             self.onCurve = onCurve
             self.touched = touched
             self.x, self.y = x, y
         def __repr__(self): return f"glyphPoint({self.x=}, {self.y=}, {self.onCurve=})"
     def _from_bytes(self, b:Parser):
-        self.numberOfContours = b.parse(uint16)
-        self.xMin = b.parse(int16)
-        self.yMin = b.parse(int16)
-        self.xMax = b.parse(int16)
-        self.yMax = b.parse(int16)
-        if self.numberOfContours > 0:
-            self.endPtsContours = b.parse(uint16, count=self.numberOfContours)
-            if type(self.endPtsContours) != list: self.endPtsContours = [self.endPtsContours]
-            self.instructionLength = b.parse(uint16)
-            self.instructions = b.parse(uint8, count=self.instructionLength)
-            self.flags = [None] * (self.endPtsContours[-1] + 1)
-            i = 0
-            while i < len(self.flags):
-                count = 1
-                flag = b.parse(uint8)
-                assert flag & 0xC0 == 0, "last two flags must be 0"
-                if flag & 0x8: count += b.parse(uint8)
-                for j in range(count):
-                    self.flags[i] = flag
+        if len(b.b) == 0: # support glyph without outlines, like spaces
+            self.numberOfContours = 0
+            self.endPtsContours = []
+            self.xMin = 0
+            self.yMin = 0
+            self.xMax = 0
+            self.yMax = 0
+            self.x = []
+            self.y = []
+            self.flags = []
+        else:
+            self.numberOfContours = b.parse(int16)
+            self.xMin = b.parse(int16)
+            self.yMin = b.parse(int16)
+            self.xMax = b.parse(int16)
+            self.yMax = b.parse(int16)
+            if self.numberOfContours > 0:
+                self.endPtsContours = b.parse(uint16, count=self.numberOfContours)
+                if type(self.endPtsContours) != list: self.endPtsContours = [self.endPtsContours]
+                self.instructionLength = b.parse(uint16)
+                self.instructions = b.parse(uint8, count=self.instructionLength)
+                self.flags = [None] * (self.endPtsContours[-1] + 1)
+                i = 0
+                while i < len(self.flags):
+                    count = 1
+                    flag = b.parse(uint8)
+                    assert flag & 0xC0 == 0, "last two flags must be 0"
+                    if flag & 0x8: count += b.parse(uint8)
+                    for j in range(count):
+                        self.flags[i] = flag
+                        i += 1
+                assert self.flags[-1] != None
+
+                i = prevX = 0
+                self.x = [None] * (self.endPtsContours[-1] + 1)
+                while i < len(self.x):
+                    x_short = self.flags[i] & 0x2
+                    x_same_or_positive = self.flags[i] & 0x10
+                    if x_short and x_same_or_positive: x = prevX + b.parse(uint8)
+                    elif x_short and not x_same_or_positive: x = prevX - b.parse(uint8)
+                    elif not x_short and x_same_or_positive: x = prevX
+                    else: x = prevX + b.parse(int16)
+                    self.x[i] = prevX = x
                     i += 1
-            assert self.flags[-1] != None
 
-            i = prevX = 0
-            self.x = [None] * (self.endPtsContours[-1] + 1)
-            while i < len(self.x):
-                x_short = self.flags[i] & 0x2
-                x_same_or_positive = self.flags[i] & 0x10
-                if x_short and x_same_or_positive: x = prevX + b.parse(uint8)
-                elif x_short and not x_same_or_positive: x = prevX - b.parse(uint8)
-                elif not x_short and x_same_or_positive: x = prevX
-                else: x = prevX + b.parse(int16)
-                self.x[i] = prevX = x
-                i += 1
-
-            i = prevY = 0
-            self.y = [None] * (self.endPtsContours[-1] + 1)
-            while i < len(self.y):
-                y_short = self.flags[i] & 0x4
-                y_same_or_positive = self.flags[i] & 0x20
-                if y_short and y_same_or_positive: y = prevY + b.parse(uint8)
-                elif y_short and not y_same_or_positive: y = prevY - b.parse(uint8)
-                elif not y_short and y_same_or_positive: y = prevY
-                else: y = prevY + b.parse(int16)
-                self.y[i] = prevY = y
-                i += 1
-        elif self.numberOfContours < 0: raise NotImplementedError("Compound glyph")
+                i = prevY = 0
+                self.y = [None] * (self.endPtsContours[-1] + 1)
+                while i < len(self.y):
+                    y_short = self.flags[i] & 0x4
+                    y_same_or_positive = self.flags[i] & 0x20
+                    if y_short and y_same_or_positive: y = prevY + b.parse(uint8)
+                    elif y_short and not y_same_or_positive: y = prevY - b.parse(uint8)
+                    elif not y_short and y_same_or_positive: y = prevY
+                    else: y = prevY + b.parse(int16)
+                    self.y[i] = prevY = y
+                    i += 1
+            elif self.numberOfContours < 0:
+                """
+                Compound Glyph
+                This glyph is made from multiple other glyphs. Instead of loading x,y and flags:
+                Populate self.children with glyphComponents and loads any instructions
+                """
+                self.children = [glyphComponent(b)]
+                while self.children[-1].MORE_COMPONENTS: self.children.append(glyphComponent(b))
+                if any([child.WE_HAVE_INSTRUCTIONS for child in self.children]):
+                    self.instructionLength = b.parse(uint16)
+                    self.instructions = b.parse(uint8, count=self.instructionLength)
     
     def get_point(self, i:int, outline:str="original") -> glyphPoint:
         assert outline in ["original", "fitted"]
@@ -270,3 +293,35 @@ class glyf(table):
         else: x,y = self.fitted_x, self.fitted_y
         assert len(x) > i >= 0, f"Error: invalid index {i=}"
         return self.glyphPoint(x[i], y[i], bool(self.flags[i] & 0x01) if i < len(self.flags) else False, self.touched[i]) # onCurve is always False for phantom points
+
+class glyphComponent(table):
+    masks = {
+        "ARG_1_AND_2_ARE_WORDS": 0x0001,
+        "ARGS_ARE_XY_VALUES": 0x0002,
+        "ROUND_XY_TO_GRID": 0x0004,
+        "WE_HAVE_A_SCALE": 0x0008,
+        "MORE_COMPONENTS": 0x0020,
+        "WE_HAVE_AN_X_AND_Y_SCALE": 0x0040,
+        "WE_HAVE_A_TWO_BY_TWO": 0x0080,
+        "WE_HAVE_INSTRUCTIONS": 0x0100,
+        "USE_MY_METRICS": 0x0200,
+        "OVERLAP_COMPOUND": 0x0400,
+        "SCALED_COMPONENT_OFFSET": 0x0800,
+        "UNSCALED_COMPONENT_OFFSET": 0x1000,
+        "Reserved": 0xE010
+    }
+    def _from_bytes(self, b:Parser):
+        self.flags = b.parse(uint16)
+        self.glyphIndex = b.parse(uint16)
+        [setattr(self, name, bool(self.flags & value)) for name, value in glyphComponent.masks.items()] # replace class variables with their bools
+        if self.ARG_1_AND_2_ARE_WORDS:
+            if self.ARGS_ARE_XY_VALUES: self.arg1, self.arg2 = b.parse(int16, count=2)
+            else: self.arg1, self.arg2 = b.parse(uint16, count=2)
+        else:
+            if self.ARGS_ARE_XY_VALUES: self.arg1, self.arg2 = b.parse(int8, count=2)
+            else: self.arg1, self.arg2 = b.parse(uint8, count=2)
+        if self.WE_HAVE_A_SCALE: self.scale = b.parse(F2Dot14)
+        elif self.WE_HAVE_AN_X_AND_Y_SCALE: self.xscale, self.yscale = b.parse(F2Dot14, count=2)
+        elif self.WE_HAVE_A_TWO_BY_TWO: self.xscale, self.scale01, self.scale10, self.yscale = b.parse(F2Dot14, count=4)
+        assert self.Reserved == False # reserved bits should be set to 0
+        assert int(self.WE_HAVE_A_SCALE) + int(self.WE_HAVE_AN_X_AND_Y_SCALE) + int(self.WE_HAVE_A_TWO_BY_TWO) in [0,1] # at most one of these flags can be True at a time
