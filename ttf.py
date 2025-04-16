@@ -129,7 +129,8 @@ class Interpreter:
         if zp == 0: return self.twilight[point_index]
         else: return self.g.get_point(point_index, outline)
 
-    def getGlyph(self, unicode:int=None, fontsize=None, dpi=None, glyphIndex=None):
+    def getGlyph(self, unicode:int=None, fontsize=None, dpi=None, glyphIndex=None, antialiasing=0):
+        self.antialiasing = antialiasing
         assert (unicode != None and isinstance(unicode, int)) or glyphIndex != None
         assert fontsize != None or self.fontsize != None, "Specify fontsize"
         assert dpi != None or self.dpi != None, "Specify dpi"
@@ -250,10 +251,14 @@ class Interpreter:
         Uses the non-zero winding number rule, which means: for each pixel, go right and on each intersection with any contour segment, determine the gradient at that point. if the gradient points up, add 1, else sub 1. If the result is zero, the point is outside, else, its inside
         """
         pts = [self.g.get_point(i, "fitted") for i in range(self.g.endPtsContours[-1] + 1)] if self.g.endPtsContours != [] else [glyf.glyphPoint(0, 0, False)] # default 0 to return a bitmap of 0
+        assert isinstance(self.antialiasing, int)
         maxX, minX = max(pts, key=lambda p: p.x).x, min(pts, key=lambda p: p.x).x
         maxY, minY = max(pts, key=lambda p: p.y).y, min(pts, key=lambda p: p.y).y
         width = math.ceil(maxX - minX)
         height = math.ceil(maxY - minY)
+        if self.antialiasing > 1:
+            width, height, maxX, minX, maxY, minY = map(lambda x: x*self.antialiasing, [width, height, maxX, minX, maxY, minY])
+            pts = [glyf.glyphPoint(p.x*self.antialiasing, p.y*self.antialiasing, p.onCurve) for p in pts]
         pts = [glyf.glyphPoint(p.x-minX, p.y-minY, p.onCurve) for p in pts] # shift into positive range
         bitmap = [[None for x in range(width)] for y in range(height)]
         # add oncurve points between consecutive control points
@@ -303,6 +308,14 @@ class Interpreter:
                 x = column + 0.5
                 relevant_intersections = [i for i in intersections if i["x"] >= x]
                 bitmap[height - row - 1][column] = 1 if sum([i["winding_number"] for i in relevant_intersections]) != 0 else 0
+        if self.antialiasing > 1:
+            new_bitmap = [[None for x in range(width // self.antialiasing)] for y in range(height // self.antialiasing)]
+            for y in range(0, height, self.antialiasing):
+                for x in range(0, width, self.antialiasing):
+                    values = [bitmap[ny][nx] for ny in range(y, y+self.antialiasing) for nx in range(x,x+self.antialiasing)]
+                    nx, ny = int(x // self.antialiasing), int(y // self.antialiasing)
+                    new_bitmap[ny][nx] = sum(values) / len(values)
+            return new_bitmap
         return bitmap
     
     def print_debug(self, op:str, v:bytes=None):
