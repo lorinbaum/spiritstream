@@ -5,14 +5,14 @@ from table import *
 import op as ops
 
 # Architecture notes:
-# - have a ttf file object that manages table data access efficiently
+# - have a ttf file object that manages table data access efficiently and lazily
 
 # CHECKSUM
 def pad4(b:bytes) -> bytes: return b.ljust((len(b) + 3) // 4 * 4, b'\0')
 def checkSum(b:bytes) -> int: return sum([int.from_bytes(b[i:i+4], "big") for i in range(0, len(b), 4) if (b:=pad4(b))]) & 0xFFFFFFFF
 
 def quadratic_equation(a, b, c) -> Union[None, Tuple[float]]:
-    if a == 0:  return (-c / b,) # not quadratic, but linear. Function should still return x for 0
+    if a == 0: return None if b == 0 else (-c / b,) # not quadratic, but linear. Function should still return x for 0
     if (root:=b**2-4*a*c) < 0: return None
     x1 = (-b + math.sqrt(root)) / (2*a)
     x2 = (-b - math.sqrt(root)) / (2*a)
@@ -252,10 +252,12 @@ class Interpreter:
         """
         pts = [self.g.get_point(i, "fitted") for i in range(self.g.endPtsContours[-1] + 1)] if self.g.endPtsContours != [] else [glyf.glyphPoint(0, 0, False)] # default 0 to return a bitmap of 0
         assert isinstance(self.antialiasing, int)
-        maxX, minX = max(pts, key=lambda p: p.x).x, min(pts, key=lambda p: p.x).x
-        maxY, minY = max(pts, key=lambda p: p.y).y, min(pts, key=lambda p: p.y).y
-        width = math.ceil(maxX - minX)
-        height = math.ceil(maxY - minY)
+        xs, ys = [p.x for p in pts], [p.y for p in pts]
+        minX, maxX = math.floor(min(xs)), math.ceil(max(xs))
+        minY, maxY = math.floor(min(ys)), math.ceil(max(ys))
+        self.g.bearing = vec2(math.floor(self.g.leftSideBearing) + minX, maxY)
+        width = maxX - minX
+        height = maxY - minY
         if self.antialiasing > 1:
             width, height, maxX, minX, maxY, minY = map(lambda x: x*self.antialiasing, [width, height, maxX, minX, maxY, minY])
             pts = [glyf.glyphPoint(p.x*self.antialiasing, p.y*self.antialiasing, p.onCurve) for p in pts]
