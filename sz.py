@@ -1,22 +1,25 @@
+from pathlib import Path
 if __name__ == "__main__":
-    files = ["table.py", "ttf.py", "vec.py", "dtype.py", "op.py"]
-    
-    counts = [0] * len(files)
-    for i, file in enumerate(files):
+
+    COLUMN_WIDTH = 35
+
+    paths = [Path("editor.py")] + [p for p in Path("./spiritstream").rglob("*") if p.is_file() and p.suffix == ".py"]
+    counts = [0] * len(paths)
+    for i, file in enumerate(paths):
         with open(file, "r") as f:
             t = f.readlines()
         docstring = False
         for line in [l.strip() for l in t]:
             if line.startswith("\"\"\""):
-                docstring = True
+                if not line.endswith("\"\"\""): docstring = True 
                 continue
             if docstring and line.endswith("\"\"\""):
                 docstring = False
                 continue
-            if line.startswith("#") or line == "": continue
+            if line.startswith("#") or line == "" or docstring: continue
             counts[i] += 1
 
-    for c, f in zip(counts, files): print(f"{f:10}:{c:6}")
-    print("-----------------")
-    print(f"Total     :{sum(counts):6}")
+    for c, f in zip(counts, paths): print(f"{f.as_posix():{COLUMN_WIDTH}}:{c:6}")
+    print("-" * (COLUMN_WIDTH + 7))
+    print(f"{'Total':{COLUMN_WIDTH}}:{sum(counts):6}")
         
