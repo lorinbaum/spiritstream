@@ -1,6 +1,6 @@
-from dtype import *
+from spiritstream.dtype import *
 from typing import Union
-from vec import vec2
+from spiritstream.vec import vec2
 import math
 
 class Parser:

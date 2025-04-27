@@ -8,6 +8,7 @@ class vec2:
     def mag(self): return math.sqrt(self.x**2 + self.y**2)
     def normalize(self): return vec2(self.x / self.mag(), self.y / self.mag())
     def components(self): return [self.x, self.y]
+    def copy(self): return vec2(self.x, self.y)
     def dot(self, other) -> int:
         assert type(other) == vec2
         return sum([self.x * other.x, self.y * other.y])

@@ -1,9 +1,9 @@
 import unittest, math
-from ttf import *
+from spiritstream.font.ttf import *
 from random import random, randint
 from typing import List, Union
-from table import glyf
-from op import push, pop, orthogonal_projection, FU_to_px, name_code
+from spiritstream.font.table import glyf
+from spiritstream.font.op import push, pop, orthogonal_projection, FU_to_px, name_code
 
 class maxp:
     maxFunctionDefs = 2

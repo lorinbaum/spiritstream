@@ -1,8 +1,8 @@
 from typing import List, Union, Dict, Tuple
-from vec import vec2
-from dtype import *
-from table import *
-import op as ops
+from spiritstream.vec import vec2
+from spiritstream.dtype import *
+from spiritstream.font.table import *
+import spiritstream.font.op as ops
 
 # Architecture notes:
 # - have a ttf file object that manages table data access efficiently and lazily

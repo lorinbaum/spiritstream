@@ -1,10 +1,10 @@
 from typing import Union, List, Callable
-from vec import vec2
-from dtype import *
+from spiritstream.vec import vec2
+from spiritstream.dtype import *
 import math
 from dataclasses import dataclass
 from functools import partial
-import ttf
+import spiritstream.font.ttf as ttf
 
 """GEOMETRY OPS"""
 

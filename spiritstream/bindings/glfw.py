@@ -1,8 +1,11 @@
 import ctypes
+from pathlib import Path
 
-glfw = ctypes.CDLL("./lib/libglfw.so.3.4")
+# reference: https://www.glfw.org/docs/latest/topics.html
 
-def glfwFunc(name, restype, argtypes):
+glfw = ctypes.CDLL(Path(__file__).resolve().parent / "libglfw.so.3.4")
+
+def glfwfunc(name, restype, argtypes):
     f = getattr(glfw, name)
     f.restype, f.argtypes = restype, argtypes
     return f
@@ -349,14 +352,18 @@ class _GLFWwindow(ctypes.Structure): pass
 GLFWwindow = ctypes.POINTER(_GLFWwindow)
 GLFWmonitor = ctypes.c_void_p
 
+GLFWcharfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_uint)
+GLFWkeyfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int)
 
-glfwInit = glfwFunc("glfwInit", ctypes.c_int, [])
-glfwWindowHint = glfwFunc("glfwWindowHint", None, [ctypes.c_int, ctypes.c_int])
-glfwCreateWindow = glfwFunc("glfwCreateWindow", GLFWwindow, [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, GLFWmonitor, GLFWwindow])
-glfwWindowShouldClose = glfwFunc("glfwWindowShouldClose", ctypes.c_int, [GLFWwindow])
-glfwSetWindowShouldClose = glfwFunc("glfwSetWindowShouldClose", None, [GLFWwindow, ctypes.c_int])
-glfwGetKey = glfwFunc("glfwGetKey", ctypes.c_int, [GLFWwindow, ctypes.c_int])
-glfwSwapBuffers = glfwFunc("glfwSwapBuffers", None, [GLFWwindow])
-glfwPollEvents = glfwFunc("glfwPollEvents", None, [])
-glfwTerminate = glfwFunc("glfwTerminate", None, [])
-glfwMakeContextCurrent = glfwFunc("glfwMakeContextCurrent", GLFWwindow, [])
+glfwInit = glfwfunc("glfwInit", ctypes.c_int, [])
+glfwWindowHint = glfwfunc("glfwWindowHint", None, [ctypes.c_int, ctypes.c_int])
+glfwCreateWindow = glfwfunc("glfwCreateWindow", GLFWwindow, [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, GLFWmonitor, GLFWwindow])
+glfwWindowShouldClose = glfwfunc("glfwWindowShouldClose", ctypes.c_int, [GLFWwindow])
+glfwSetWindowShouldClose = glfwfunc("glfwSetWindowShouldClose", None, [GLFWwindow, ctypes.c_int])
+glfwGetKey = glfwfunc("glfwGetKey", ctypes.c_int, [GLFWwindow, ctypes.c_int])
+glfwSwapBuffers = glfwfunc("glfwSwapBuffers", None, [GLFWwindow])
+glfwPollEvents = glfwfunc("glfwPollEvents", None, [])
+glfwTerminate = glfwfunc("glfwTerminate", None, [])
+glfwMakeContextCurrent = glfwfunc("glfwMakeContextCurrent", GLFWwindow, [])
+glfwSetCharCallback = glfwfunc("glfwSetCharCallback", GLFWcharfun, [GLFWwindow, GLFWcharfun])
+glfwSetKeyCallback = glfwfunc("glfwSetKeyCallback", GLFWkeyfun, [GLFWwindow, GLFWkeyfun])

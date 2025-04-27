@@ -47,6 +47,7 @@ GL_TEXTURE0 = 0x84C0
 GL_BLEND = 0x0BE2
 GL_SRC_ALPHA = 0x0302
 GL_ONE_MINUS_SRC_ALPHA = 0x0303
+GL_UNPACK_ALIGNMENT = 0x0CF5
 
 glViewport = glfunc("glViewport", None, [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int])
 glClear = glfunc("glClear", None, [ctypes.c_uint])
@@ -84,7 +85,11 @@ glTexImage2D = glfunc("glTexImage2D", None, [ctypes.c_uint, ctypes.c_int, ctypes
 glActiveTexture = glfunc("glActiveTexture", None, [ctypes.c_uint])
 glGetUniformLocation = glfunc("glGetUniformLocation", ctypes.c_int, [ctypes.c_uint, ctypes.c_char_p])
 glUniform1i = glfunc("glUniform1i", None, [ctypes.c_int, ctypes.c_int])
+glUniform3f = glfunc("glUniform3f", None, [ctypes.c_int, ctypes.c_float, ctypes.c_float, ctypes.c_float])
 glEnable = glfunc("glEnable", None, [ctypes.c_uint])
 glBlendFunc = glfunc("glBlendFunc", None, [ctypes.c_uint, ctypes.c_uint])
+glPixelStorei = glfunc("glPixelStorei", None, [ctypes.c_uint, ctypes.c_int])
+
+glBufferSubData = glfunc("glBufferSubData", None, [ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_void_p])
 
 glPolygonMode = glfunc("glPolygonMode", None, [ctypes.c_uint, ctypes.c_uint])
