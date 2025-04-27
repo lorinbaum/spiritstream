@@ -1,4 +1,4 @@
-import math, struct
+import math
 from spiritstream.vec import vec2
 from spiritstream.bindings.glfw import *
 from spiritstream.bindings.opengl import *
@@ -9,6 +9,7 @@ LINEHEIGHT = 1.5
 DPI = 96
 WIDTH = 500
 HEIGHT = 1000
+PADDING = 5 # px
 
 glfwInit()
 glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
@@ -22,14 +23,13 @@ glfwMakeContextCurrent(window)
 with open("text.txt", "r") as f: text = f.read()
 
 # load glyph atlas
-# chars = set(text + "|") # add "|" for cursor
-chars = set([chr(i) for i in range(32,128)] + list("öäüß")) # add "|" for cursor
+chars = set([chr(i) for i in range(32,128)] + list("öäüß"))
 F = Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf")
 grid_size = math.ceil(math.sqrt(len(chars)))
 glyphs = {c: F.render(c, FONTSIZE, DPI) for c in chars}
 xMin, xMax = min(g.bearing.x for g in glyphs.values()), max(g.bearing.x + g.size.x for g in glyphs.values())
 yMin, yMax = min(g.bearing.y - g.size.y for g in glyphs.values()), max(g.bearing.y for g in glyphs.values())
-tile = vec2(xMax - xMin, yMax - yMin) # big enough for every glyph. 
+tile = vec2(xMax - xMin, yMax - yMin) # big enough for every glyph
 origin = vec2(-xMin, -yMin)
 texture_size = tile * grid_size
 bmp = [[0 for x in range(texture_size.x)] for row in range(texture_size.y)] # single channel
@@ -44,12 +44,12 @@ for i, v in enumerate(glyphs.values()):
         assert 0 <= (y_idx := v.texture_coords[2].y + y) < texture_size.y, f"{y_idx=}, {texture_size.x=}"
         for x, px in enumerate(row):
             assert 0 <= (x_idx := v.texture_coords[2].x + x) < texture_size.x, f"{x_idx=}, {texture_size.x=}"
-            bmp[y_idx][x_idx] = int(px*255) # red channel only and invert y
-    v.texture_coords = [coord / texture_size for coord in v.texture_coords] # scale and invert texture coordinates for use in vertices
+            bmp[y_idx][x_idx] = int(px*255) # red channel only
+    v.texture_coords = [coord / texture_size for coord in v.texture_coords] # scale texture coordinates for use in vertices
 for v in glyphs.values(): del v.bitmap
 
 # create hitboxes
-    # normalize tile, texture and glyph data into range 0 to 2. the actual coordinates are -1 to 1, but these are just relative distances
+    # normalize tile, texture and glyph data into range 0 to 2
 def window_norm(v:vec2): return (v/vec2(WIDTH/2, HEIGHT/2))
 tile = window_norm(tile)
 for v in glyphs.values():
@@ -57,23 +57,25 @@ for v in glyphs.values():
     v.size = window_norm(v.size)
     v.advance = v.advance*2/WIDTH
 
+padding = PADDING * 2 / WIDTH
+textbox = [-1 + padding, 1 - padding, 1 - padding, -1 + padding] # x0, y0, x1, y1
 cursor = 0 # start at index 0
 def getTextQuads():
     """returns tuple(vertices, indices, cursor_coords)"""
     vertices = []
     indices = []
-    offset = vec2(-1, 1-tile.y) # bottom left corner of a character that is guaranteed to fit vertically in the top row 
-    cursor_coords = [] # left of first character
+    offset = vec2(textbox[0], textbox[1]-tile.y) # bottom left corner of a character that is guaranteed to fit vertically in the top row 
+    cursor_coords = []
     for char in text:
-        cursor_coords.append((offset-vec2(2/WIDTH, 0)).copy())
+        cursor_coords.append((offset-vec2(2/WIDTH, 0)).copy()) # move cursor 1 pixel to left of char
         if ord(char) == 10:  # newline
-            offset = vec2(-1, offset.y-tile.y*LINEHEIGHT)
+            offset = vec2(textbox[0], offset.y-tile.y*LINEHEIGHT)
             continue
         g = glyphs[char]
         if ord(char) == 32: # space
             offset.x += g.advance
             continue
-        if offset.x + g.advance > 1: offset = vec2(-1, offset.y-tile.y*LINEHEIGHT) # new line, no word splitting
+        if offset.x + g.advance > textbox[2]: offset = vec2(textbox[0], offset.y-tile.y*LINEHEIGHT) # new line, no word splitting
         vertices += [
             # x                                        y                                    z  texture
             (top_left_x := offset.x + g.bearing.x), (top_left_y := offset.y + g.bearing.y), 0, *g.texture_coords[0].components(), # top left
@@ -95,7 +97,6 @@ def compile_shader(shader_type, source_code):
     shader_id = glCreateShader(shader_type)
     src_encoded = source_code.encode('utf-8')
     
-    # Single-string variant
     src_ptr = ctypes.c_char_p(src_encoded)
     src_array = (ctypes.c_char_p * 1)(src_ptr)
     length_array = (ctypes.c_int * 1)(len(src_encoded))
@@ -103,7 +104,6 @@ def compile_shader(shader_type, source_code):
     glShaderSource(shader_id, 1, src_array, length_array)
     glCompileShader(shader_id)
     
-    # Error checking
     success = ctypes.c_int(0)
     glGetShaderiv(shader_id, GL_COMPILE_STATUS, ctypes.byref(success))
     if not success.value:
@@ -264,7 +264,6 @@ def updateText():
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 
-
 @GLFWcharfun
 def char_callback(window, codepoint):
     global text, cursor
@@ -316,6 +315,8 @@ while not glfwWindowShouldClose(window):
 glDeleteVertexArrays(1, VAO)
 glDeleteBuffers(1, VBO)
 glDeleteBuffers(1, EBO)
+glDeleteVertexArrays(1, VAO1)
+glDeleteBuffers(1, VBO1)
+glDeleteBuffers(1, EBO1)
 glDeleteProgram(shaderProgram)
-
 glfwTerminate()
