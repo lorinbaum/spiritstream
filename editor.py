@@ -1,8 +1,9 @@
-import math
+import math, time
 from spiritstream.vec import vec2
 from spiritstream.bindings.glfw import *
 from spiritstream.bindings.opengl import *
 from spiritstream.font import Font
+from copy import deepcopy
 
 FONTSIZE = 12
 LINEHEIGHT = 1.5
@@ -10,15 +11,21 @@ DPI = 96
 WIDTH = 500
 HEIGHT = 1000
 PADDING = 5 # px
+RESIZED = False
 
 glfwInit()
 glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
 glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
 glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
 glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, True)
-glfwWindowHint(GLFW_RESIZABLE, False)
 window = glfwCreateWindow(WIDTH, HEIGHT, b"Spiritstream", None, None)
 glfwMakeContextCurrent(window)
+
+@GLFWframebuffersizefun
+def framebuffer_size_callback(window, width, height):
+    global WIDTH, HEIGHT, RESIZED
+    WIDTH, HEIGHT, RESIZED = width, height, True
+glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
 
 with open("text.txt", "r") as f: text = f.read()
 
@@ -50,32 +57,38 @@ for v in glyphs.values(): del v.bitmap
 
 # create hitboxes
     # normalize tile, texture and glyph data into range 0 to 2
+scaled_glyphs, scaled_tile, padding, textbox = {}, None, None, None
 def window_norm(v:vec2): return (v/vec2(WIDTH/2, HEIGHT/2))
-tile = window_norm(tile)
-for v in glyphs.values():
-    v.bearing = window_norm(v.bearing)
-    v.size = window_norm(v.size)
-    v.advance = v.advance*2/WIDTH
+def rescale():
+    global scaled_glyphs, scaled_tile, padding, textbox
+    scaled_glyphs, scaled_tile, padding, textbox = {}, None, None, None
+    scaled_glyphs = deepcopy(glyphs)
+    scaled_tile = window_norm(tile)
+    for k, v in glyphs.items():
+        scaled_glyphs[k].bearing = window_norm(v.bearing)
+        scaled_glyphs[k].size = window_norm(v.size)
+        scaled_glyphs[k].advance = v.advance*2/WIDTH
+    padding = PADDING * 2 / WIDTH
+    textbox = [-1 + padding, 1 - padding, 1 - padding, -1 + padding] # x0, y0, x1, y1
+rescale()
 
-padding = PADDING * 2 / WIDTH
-textbox = [-1 + padding, 1 - padding, 1 - padding, -1 + padding] # x0, y0, x1, y1
 cursor = 0 # start at index 0
 def getTextQuads():
     """returns tuple(vertices, indices, cursor_coords)"""
     vertices = []
     indices = []
-    offset = vec2(textbox[0], textbox[1]-tile.y) # bottom left corner of a character that is guaranteed to fit vertically in the top row 
+    offset = vec2(textbox[0], textbox[1]-scaled_tile.y) # bottom left corner of a character that is guaranteed to fit vertically in the top row 
     cursor_coords = []
     for char in text:
         cursor_coords.append((offset-vec2(2/WIDTH, 0)).copy()) # move cursor 1 pixel to left of char
         if ord(char) == 10:  # newline
-            offset = vec2(textbox[0], offset.y-tile.y*LINEHEIGHT)
+            offset = vec2(textbox[0], offset.y-scaled_tile.y*LINEHEIGHT)
             continue
-        g = glyphs[char]
+        g = scaled_glyphs[char]
         if ord(char) == 32: # space
             offset.x += g.advance
             continue
-        if offset.x + g.advance > textbox[2]: offset = vec2(textbox[0], offset.y-tile.y*LINEHEIGHT) # new line, no word splitting
+        if offset.x + g.advance > textbox[2]: offset = vec2(textbox[0], offset.y-scaled_tile.y*LINEHEIGHT) # new line, no word splitting
         vertices += [
             # x                                        y                                    z  texture
             (top_left_x := offset.x + g.bearing.x), (top_left_y := offset.y + g.bearing.y), 0, *g.texture_coords[0].components(), # top left
@@ -201,11 +214,11 @@ glBindBuffer(GL_ARRAY_BUFFER, 0)
 glBindVertexArray(0)
 
 def getCursorQuad(): return [
-        # x,y                                                                z  texture
-        *(cursor_coords[cursor] + vec2(0, glyphs["|"].size.y)).components(), 0.2, *glyphs["|"].texture_coords[0].components(), # top left
-        *(cursor_coords[cursor] + glyphs["|"].size).components(),            0.2, *glyphs["|"].texture_coords[1].components(), # top right
-        *cursor_coords[cursor].components(),                                 0.2, *glyphs["|"].texture_coords[2].components(), # bottom left
-        *(cursor_coords[cursor] + vec2(glyphs["|"].size.x, 0)).components(), 0.2, *glyphs["|"].texture_coords[3].components(), # bottom right
+        # x,y                                                                            z    texture
+        *(cursor_coords[cursor] + vec2(0, (g:=scaled_glyphs["|"]).size.y)).components(), 0.2, *g.texture_coords[0].components(), # top left
+        *(cursor_coords[cursor] + g.size).components(),                                  0.2, *g.texture_coords[1].components(), # top right
+        *cursor_coords[cursor].components(),                                             0.2, *g.texture_coords[2].components(), # bottom left
+        *(cursor_coords[cursor] + vec2(g.size.x, 0)).components(),                       0.2, *g.texture_coords[3].components(), # bottom right
     ]
 cursor_vertices = cursor_vertices = getCursorQuad()
 cursor_indices = [0, 1, 2,   1, 2, 3]
@@ -292,12 +305,33 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
 glfwSetCharCallback(window, char_callback)
 glfwSetKeyCallback(window, key_callback)
 
+fps = None
+frame_count = 0
+last_frame_time = time.time()
+last_resize_time = time.time()
+glClearColor(0, 0, 0, 1)
+
 while not glfwWindowShouldClose(window):
     if glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS: glfwSetWindowShouldClose(window, GLFW_TRUE)
+    
+    # FPS
+    frame_count += 1
+    current_time = time.time()
+    if (delta:=current_time - last_frame_time) >= 1.0:
+        fps = int((frame_count / delta + 0.5) // 1)
+        frame_count = 0
+        last_frame_time = current_time
+        print(f"FPS: {fps}", end="\r")
+    if RESIZED and current_time - last_resize_time >= 0.2:
+        RESIZED = False
+        glViewport(0, 0, WIDTH, HEIGHT)
+        rescale()
+        updateText()
+        updateCursor(cursor)
+        last_resize_time = current_time
 
-    glClearColor(0, 0, 0, 1)
+    
     glClear(GL_COLOR_BUFFER_BIT)
-
     glUseProgram(shaderProgram)
     glUniform3f(glGetUniformLocation(shaderProgram, b"textColor"), 1.0, 0.5, 0.2)
     glBindVertexArray(VAO)
@@ -307,10 +341,11 @@ while not glfwWindowShouldClose(window):
     glBindVertexArray(VAO1)
     glDrawElements(GL_TRIANGLES, len(cursor_indices), GL_UNSIGNED_INT, 0)
 
+
     if (error:=glGetError()) != GL_NO_ERROR: print(f"OpenGL Error: {hex(error)}")
 
     glfwSwapBuffers(window)
-    glfwPollEvents()
+    glfwWaitEvents()
 
 glDeleteVertexArrays(1, VAO)
 glDeleteBuffers(1, VBO)

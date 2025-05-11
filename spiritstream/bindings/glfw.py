@@ -354,6 +354,7 @@ GLFWmonitor = ctypes.c_void_p
 
 GLFWcharfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_uint)
 GLFWkeyfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int)
+GLFWframebuffersizefun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int)
 
 glfwInit = glfwfunc("glfwInit", ctypes.c_int, [])
 glfwWindowHint = glfwfunc("glfwWindowHint", None, [ctypes.c_int, ctypes.c_int])
@@ -363,7 +364,9 @@ glfwSetWindowShouldClose = glfwfunc("glfwSetWindowShouldClose", None, [GLFWwindo
 glfwGetKey = glfwfunc("glfwGetKey", ctypes.c_int, [GLFWwindow, ctypes.c_int])
 glfwSwapBuffers = glfwfunc("glfwSwapBuffers", None, [GLFWwindow])
 glfwPollEvents = glfwfunc("glfwPollEvents", None, [])
+glfwWaitEvents = glfwfunc("glfwWaitEvents", None, [])
 glfwTerminate = glfwfunc("glfwTerminate", None, [])
 glfwMakeContextCurrent = glfwfunc("glfwMakeContextCurrent", GLFWwindow, [])
 glfwSetCharCallback = glfwfunc("glfwSetCharCallback", GLFWcharfun, [GLFWwindow, GLFWcharfun])
 glfwSetKeyCallback = glfwfunc("glfwSetKeyCallback", GLFWkeyfun, [GLFWwindow, GLFWkeyfun])
+glfwSetFramebufferSizeCallback = glfwfunc("glfwSetFramebufferSizeCallback", GLFWframebuffersizefun, [GLFWwindow, GLFWframebuffersizefun])
