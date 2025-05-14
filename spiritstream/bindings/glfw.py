@@ -337,8 +337,18 @@ GLFW_PLATFORM_WAYLAND = 0x00060003
 GLFW_PLATFORM_X11 = 0x00060004
 GLFW_PLATFORM_NULL = 0x00060005
 GLFW_DONT_CARE = 1
-# GLAPIENTRY = APIENTRY
-# GLFW_GLAPIENTRY_DEFINED  
+GLFW_MOUSE_BUTTON_1 = 0
+GLFW_MOUSE_BUTTON_2 = 1
+GLFW_MOUSE_BUTTON_3 = 2
+GLFW_MOUSE_BUTTON_4 = 3
+GLFW_MOUSE_BUTTON_5 = 4
+GLFW_MOUSE_BUTTON_6 = 5
+GLFW_MOUSE_BUTTON_7 = 6
+GLFW_MOUSE_BUTTON_8 = 7
+GLFW_MOUSE_BUTTON_LAST = GLFW_MOUSE_BUTTON_8
+GLFW_MOUSE_BUTTON_LEFT = GLFW_MOUSE_BUTTON_1
+GLFW_MOUSE_BUTTON_RIGHT = GLFW_MOUSE_BUTTON_2
+GLFW_MOUSE_BUTTON_MIDDLE = GLFW_MOUSE_BUTTON_3
 
 GLFW_VERSION_MAJOR = 3
 GLFW_VERSION_MINOR = 4
@@ -355,6 +365,7 @@ GLFWmonitor = ctypes.c_void_p
 GLFWcharfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_uint)
 GLFWkeyfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int)
 GLFWframebuffersizefun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int)
+GLFWmousebuttonfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int, ctypes.c_int)
 
 glfwInit = glfwfunc("glfwInit", ctypes.c_int, [])
 glfwWindowHint = glfwfunc("glfwWindowHint", None, [ctypes.c_int, ctypes.c_int])
@@ -370,3 +381,5 @@ glfwMakeContextCurrent = glfwfunc("glfwMakeContextCurrent", GLFWwindow, [])
 glfwSetCharCallback = glfwfunc("glfwSetCharCallback", GLFWcharfun, [GLFWwindow, GLFWcharfun])
 glfwSetKeyCallback = glfwfunc("glfwSetKeyCallback", GLFWkeyfun, [GLFWwindow, GLFWkeyfun])
 glfwSetFramebufferSizeCallback = glfwfunc("glfwSetFramebufferSizeCallback", GLFWframebuffersizefun, [GLFWwindow, GLFWframebuffersizefun])
+glfwSetMouseButtonCallback = glfwfunc("glfwSetMouseButtonCallback", GLFWmousebuttonfun, [GLFWwindow, GLFWmousebuttonfun])
+glfwGetCursorPos = glfwfunc("glfwGetCursorPos", None, [GLFWwindow, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)])

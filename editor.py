@@ -4,6 +4,7 @@ from spiritstream.bindings.glfw import *
 from spiritstream.bindings.opengl import *
 from spiritstream.font import Font
 from copy import deepcopy
+from typing import Union
 
 FONTSIZE = 12
 LINEHEIGHT = 1.5
@@ -73,6 +74,9 @@ def rescale():
 rescale()
 
 cursor = 0 # start at index 0
+line_wraps = [] # holds indices where a line wraps into the next. Does not count explicit newlines
+cursor_vec = vec2(None, None) # current cursor as opengl xy coordinates
+cursor_left = None # stores whether the current cursor position used left
 def getTextQuads():
     """returns tuple(vertices, indices, cursor_coords)"""
     vertices = []
@@ -88,7 +92,9 @@ def getTextQuads():
         if ord(char) == 32: # space
             offset.x += g.advance
             continue
-        if offset.x + g.advance > textbox[2]: offset = vec2(textbox[0], offset.y-scaled_tile.y*LINEHEIGHT) # new line, no word splitting
+        if offset.x + g.advance > textbox[2]:
+            line_wraps.append(len(cursor_coords) - 1) # cursor before this char
+            offset = vec2(textbox[0], offset.y-scaled_tile.y*LINEHEIGHT) # new line, no word splitting
         vertices += [
             # x                                        y                                    z  texture
             (top_left_x := offset.x + g.bearing.x), (top_left_y := offset.y + g.bearing.y), 0, *g.texture_coords[0].components(), # top left
@@ -105,6 +111,7 @@ def getTextQuads():
     cursor_coords.append(offset.copy()) # first position after the last character
     return vertices, indices, cursor_coords
 vertices, indices, cursor_coords = getTextQuads()
+cursorX = cursor_coords[0].x # Moving up and down using arrow keys can introduce drifting to left and right. To avoid, stores original X in this variable.
 
 def compile_shader(shader_type, source_code):
     shader_id = glCreateShader(shader_type)
@@ -213,14 +220,18 @@ glEnableVertexAttribArray(1)
 glBindBuffer(GL_ARRAY_BUFFER, 0)
 glBindVertexArray(0)
 
-def getCursorQuad(): return [
-        # x,y                                                                            z    texture
-        *(cursor_coords[cursor] + vec2(0, (g:=scaled_glyphs["|"]).size.y)).components(), 0.2, *g.texture_coords[0].components(), # top left
-        *(cursor_coords[cursor] + g.size).components(),                                  0.2, *g.texture_coords[1].components(), # top right
-        *cursor_coords[cursor].components(),                                             0.2, *g.texture_coords[2].components(), # bottom left
-        *(cursor_coords[cursor] + vec2(g.size.x, 0)).components(),                       0.2, *g.texture_coords[3].components(), # bottom right
+def getCursorQuad(left=False):
+    coords = vec2(textbox[0], cursor_coords[(cursor + 1) % len(cursor_coords)].y) if left else cursor_coords[cursor]
+    global cursor_vec, cursor_left
+    cursor_vec, cursor_left = coords.copy(), left
+    return [
+        # x,y                                                             z    texture
+        *(coords + vec2(0, (g:=scaled_glyphs["|"]).size.y)).components(), 0.2, *g.texture_coords[0].components(), # top left
+        *(coords + g.size).components(),                                  0.2, *g.texture_coords[1].components(), # top right
+        *coords.components(),                                             0.2, *g.texture_coords[2].components(), # bottom left
+        *(coords + vec2(g.size.x, 0)).components(),                       0.2, *g.texture_coords[3].components(), # bottom right
     ]
-cursor_vertices = cursor_vertices = getCursorQuad()
+cursor_vertices = getCursorQuad()
 cursor_indices = [0, 1, 2,   1, 2, 3]
 
 # CURSOR vertex buffer, vertex array and element buffer
@@ -245,14 +256,33 @@ glEnableVertexAttribArray(0)
 glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5*ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
 glEnableVertexAttribArray(1)
 
-def updateCursor(new_position):
-    global cursor
-    cursor = new_position % len(cursor_coords)
-    cursor_vertices = getCursorQuad()
-    cursor_vertices_ctypes = (ctypes.c_float * len(cursor_vertices))(*cursor_vertices)
-    glBindBuffer(GL_ARRAY_BUFFER, VBO1)
-    glBufferSubData(GL_ARRAY_BUFFER, 0, ctypes.sizeof(cursor_vertices_ctypes), cursor_vertices_ctypes)
-    glBindBuffer(GL_ARRAY_BUFFER, 0)
+def updateCursor(pos:Union[int, vec2], allow_drift=True, left=False):
+    assert isinstance(pos, (int, vec2)), f"Wrong argument type \"pos\": {type(pos)}. Can only use integer (index of char in the text) or vec2 (screen coordinate)"
+    global cursor, cursorX
+    if isinstance(pos, int): # index into cursor_coords
+        cursor = pos % len(cursor_coords)
+        cursor_vertices = getCursorQuad(left=left)
+        if allow_drift: cursorX = cursor_vec.x
+        cursor_vertices_ctypes = (ctypes.c_float * len(cursor_vertices))(*cursor_vertices)
+        glBindBuffer(GL_ARRAY_BUFFER, VBO1)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, ctypes.sizeof(cursor_vertices_ctypes), cursor_vertices_ctypes)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+    elif isinstance(pos, vec2): # screen coordinate. In this case, figures out index itself.
+        if not allow_drift: pos.x = cursorX
+        if pos.y < cursor_coords[-1].y - (scaled_tile.y * LINEHEIGHT) / 2: new_cursor, allow_drift = len(cursor_coords) - 1, True
+        elif pos.y > cursor_coords[0].y + (scaled_tile.y * LINEHEIGHT) / 2: new_cursor, allow_drift = 0, True
+        else: 
+            closest = vec2(math.inf, math.inf)
+            for i, c in enumerate(cursor_coords):
+                if (d:=(pos-c).abs()).y <= closest.y:
+                    if d.x < closest.x or d.y < closest.y: new_cursor, closest, left = i, d.copy(), False
+                    # if this cursor position can be either up or down, check which is closer and take that one. if I take the down one, set left to True
+                    if i in line_wraps and i < len(cursor_coords) - 1:
+                        d0 = (pos - vec2(textbox[0], cursor_coords[i+1].y)-vec2(2/WIDTH, 0)).abs()
+                        if d0.y <= closest.y:
+                            if d0.y < closest.y or d0.x < closest.x: new_cursor, closest, left = i, d0.copy(), True
+                else: break
+        if new_cursor != None: updateCursor(new_cursor, allow_drift=allow_drift, left=left)
 
 def updateText():
     global vertices, indices, cursor_coords
@@ -288,10 +318,12 @@ def char_callback(window, codepoint):
 def key_callback(window, key:int, scancode:int, action:int, mods:int):
     global text, cursor
     if action in [GLFW_PRESS, GLFW_REPEAT]:
-        if key == GLFW_KEY_LEFT: updateCursor(cursor-1)
+        if key == GLFW_KEY_LEFT: updateCursor(cursor - 1, left=cursor-1 in line_wraps)
         if key == GLFW_KEY_RIGHT: updateCursor(cursor+1)
+        if key == GLFW_KEY_UP: updateCursor(cursor_vec + vec2(0, scaled_tile.y * LINEHEIGHT), allow_drift=False, left=cursor in line_wraps)
+        if key == GLFW_KEY_DOWN: updateCursor(cursor_vec - vec2(0, scaled_tile.y * LINEHEIGHT), allow_drift=False, left=cursor in line_wraps)
         if key == GLFW_KEY_BACKSPACE:
-            updateCursor(cursor-1)
+            updateCursor(cursor - 1, left=cursor-1 in line_wraps)
             text = text[:cursor] + text[cursor+1:]
             updateText()
         if key == GLFW_KEY_ENTER:
@@ -301,9 +333,20 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         if key == GLFW_KEY_S:
             if mods & GLFW_MOD_CONTROL: # SAVE
                 with open("text.txt", "w") as f: f.write(text)
+        if key == GLFW_KEY_HOME: updateCursor(min([0] + [i for i, c in enumerate(text) if c == "\n"] + line_wraps, key=lambda x: cursor - x if x < cursor or (x == cursor and cursor_left) else math.inf), left=True)
+        if key == GLFW_KEY_END: updateCursor(min([0] + [i for i, c in enumerate(text) if c == "\n"] + line_wraps, key=lambda x: x - cursor if x > cursor or (x == cursor != 0 and not cursor_left) else math.inf))
+
+@GLFWmousebuttonfun
+def mouse_callback(window, button:int, action:int, mods:int):
+    if button == GLFW_MOUSE_BUTTON_1 and action == GLFW_PRESS:
+        x, y = ctypes.c_double(), ctypes.c_double()
+        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
+        pos = (window_norm(vec2(x.value, y.value)) - vec2(1,1)) * vec2(1, -1) # to opengl coords
+        updateCursor(pos)
 
 glfwSetCharCallback(window, char_callback)
 glfwSetKeyCallback(window, key_callback)
+glfwSetMouseButtonCallback(window, mouse_callback)
 
 fps = None
 frame_count = 0
@@ -322,7 +365,7 @@ while not glfwWindowShouldClose(window):
         frame_count = 0
         last_frame_time = current_time
         print(f"FPS: {fps}", end="\r")
-    if RESIZED and current_time - last_resize_time >= 0.2:
+    if RESIZED:
         RESIZED = False
         glViewport(0, 0, WIDTH, HEIGHT)
         rescale()

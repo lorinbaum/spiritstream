@@ -5,6 +5,7 @@ class vec2:
         self.types = [int, float, vec2] # supported types for arithmetic
         self.x = x
         self.y = y
+    def abs(self): return vec2(abs(self.x), abs(self.y))
     def mag(self): return math.sqrt(self.x**2 + self.y**2)
     def normalize(self): return vec2(self.x / self.mag(), self.y / self.mag())
     def components(self): return [self.x, self.y]
