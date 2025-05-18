@@ -85,6 +85,7 @@ glTexImage2D = glfunc("glTexImage2D", None, [ctypes.c_uint, ctypes.c_int, ctypes
 glActiveTexture = glfunc("glActiveTexture", None, [ctypes.c_uint])
 glGetUniformLocation = glfunc("glGetUniformLocation", ctypes.c_int, [ctypes.c_uint, ctypes.c_char_p])
 glUniform1i = glfunc("glUniform1i", None, [ctypes.c_int, ctypes.c_int])
+glUniform2f = glfunc("glUniform2f", None, [ctypes.c_int, ctypes.c_float, ctypes.c_float])
 glUniform3f = glfunc("glUniform3f", None, [ctypes.c_int, ctypes.c_float, ctypes.c_float, ctypes.c_float])
 glEnable = glfunc("glEnable", None, [ctypes.c_uint])
 glBlendFunc = glfunc("glBlendFunc", None, [ctypes.c_uint, ctypes.c_uint])
