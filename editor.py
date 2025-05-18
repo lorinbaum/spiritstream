@@ -10,7 +10,6 @@ LINEHEIGHT = 1.5
 DPI = 96
 WIDTH = 700
 HEIGHT = 1000
-PADDING = 5 # px
 RESIZED = True
 
 glfwInit()
@@ -174,7 +173,7 @@ class Text:
         offset = vec2(0, self.atlas.tile.y) # bottom left corner of a character that is guaranteed to fit vertically in the top row 
         cursorcoords = []
         for char in self.text:
-            cursorcoords.append((offset+vec2(2/WIDTH, 0)).copy()) # move cursor 1 pixel to left of char
+            cursorcoords.append((offset-vec2(2/WIDTH, 0)).copy()) # move cursor 1 pixel to left of char
             if ord(char) == 10:  # newline
                 offset = vec2(0, offset.y+self.atlas.tile.y*LINEHEIGHT)
                 continue
@@ -195,7 +194,7 @@ class Text:
             last = len(vertices)//5 - 1 # 5 because xyz and texture xy makes 5 values per vertex
             indices += [
                 last-3, last-2, last-1, # triangle top left - top right - bottom left
-                last-2, last-1, last # triangle top right - bottom left - bottom right
+                last-2, last-1, last    # triangle top right - bottom left - bottom right
             ]
             offset.x += g.advance
         cursorcoords.append(offset.copy()) # first position after the last character
@@ -222,16 +221,15 @@ class Text:
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 
-    def write(self, codepoint:int, left=False):
+    def write(self, codepoint:int):
         self.text = self.text[:self.cursor.idx] + chr(codepoint) + self.text[self.cursor.idx:]
         self.update()
-        self.cursor.update(self.cursor.idx + 1, left=left)
+        self.cursor.update(self.cursor.idx + 1)
 
     def erase(self):
         self.text = self.text[:self.cursor.idx-1] + self.text[self.cursor.idx:]
         self.update()
         self.cursor.update(self.cursor.idx - 1)
-        # self.cursor.update(self.cursor.idx - 1, left=self.cursor.idx-1 in self.linewraps or self.text[self.cursor.idx - 1] == "\n")
 
 glyph_atlas = GlyphAtlas(set([chr(i) for i in range(32,128)] + list("öäüß")), Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf"), FONTSIZE, DPI)
 with open("text.txt", "r") as f: text = Text(f.read(), glyph_atlas)
@@ -319,7 +317,7 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         if key == GLFW_KEY_UP: text.cursor.update(text.cursor.pos - vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, left=text.cursor.idx in text.linewraps)
         if key == GLFW_KEY_DOWN: text.cursor.update(text.cursor.pos + vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, left=text.cursor.idx in text.linewraps)
         if key == GLFW_KEY_BACKSPACE: text.erase()
-        if key == GLFW_KEY_ENTER: text.write(ord("\n"), left=True)
+        if key == GLFW_KEY_ENTER: text.write(ord("\n"))
         if key == GLFW_KEY_S:
             if mods & GLFW_MOD_CONTROL: # SAVE
                 with open("text.txt", "w") as f: f.write(text.text)
