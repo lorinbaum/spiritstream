@@ -238,6 +238,7 @@ class Text:
         self.width = 500
         self.x = None # x offset in pixels from left border. set on load and resize of the window
         self.y = 0 # scroll offset in pixels
+        self.clipboard = None
 
         self.VBO, self.VAO, self.EBO = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
         glGenBuffers(1, ctypes.byref(self.VBO))
@@ -313,15 +314,16 @@ class Text:
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 
-    def write(self, codepoint:int):
+    def write(self, t:Union[int, str]):
+        if isinstance(t, int): t = chr(t) # codepoint
         if self.selection.length == 0:
-            self.text = self.text[:self.cursor.idx] + chr(codepoint) + self.text[self.cursor.idx:]
+            self.text = self.text[:self.cursor.idx] + t + self.text[self.cursor.idx:]
             self.update()
-            self.cursor.update(self.cursor.idx + 1)
+            self.cursor.update(self.cursor.idx + len(t))
         else:
-            self.text = self.text[:self.selection.start] + chr(codepoint) + self.text[self.selection.end:]
+            self.text = self.text[:self.selection.start] + t + self.text[self.selection.end:]
             self.update()
-            self.cursor.update(self.selection.start + 1)
+            self.cursor.update(self.selection.start + len(t))
             self.selection.reset()
 
     def erase(self, right=False):
@@ -476,6 +478,11 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
             text.selection.reset()
             text.goto(0)
             text.goto(len(text.text), selection=True)
+        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and text.selection.length > 0: text.clipboard = text.text[text.selection.start:text.selection.end] # copy
+        if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL and text.clipboard != None: text.write(text.clipboard) # paste
+        if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.length > 0: # cut
+            text.clipboard = text.text[text.selection.start:text.selection.end] # copy
+            text.erase()
         if key == GLFW_KEY_HOME: text.goto(next((vec2(0, l.y) for l in text.lines if l.idx > text.cursor.idx or (l.idx == text.cursor.idx and not text.cursor.left))), left=True, selection=selection)
         if key == GLFW_KEY_END: text.goto(next((vec2(text.width, l.y) for l in text.lines if l.idx > text.cursor.idx or (l.idx == text.cursor.idx and not text.cursor.left))), left=False, selection=selection)
 
