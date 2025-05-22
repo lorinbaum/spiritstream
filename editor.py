@@ -255,7 +255,6 @@ class Text:
         self.width = 500
         self.x = None # x offset in pixels from left border. set on load and resize of the window
         self.y = 0 # scroll offset in pixels
-        self.clipboard = None
 
         self.VBO, self.VAO, self.EBO = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
         glGenBuffers(1, ctypes.byref(self.VBO))
@@ -293,7 +292,7 @@ class Text:
             g = self.atlas[char]
             if offset.x + g.advance > self.width:
                 assert i > 0
-                self.lines.append(Line(newline, offset.y, 0 if i == 0 else self.lines[-1].end + (1 if newline else 0), i))
+                self.lines.append(Line(newline, offset.y, 0 if len(self.lines) == 0 else self.lines[-1].end + (1 if newline else 0), i))
                 newline = False
                 offset = vec2(0, offset.y+self.atlas.tile.y*LINEHEIGHT) # new line, no word splitting
             if ord(char) == 32: # space
@@ -338,6 +337,7 @@ class Text:
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 
     def write(self, t:Union[int, str]):
+        if t == None: return # can happen on empty clipboard
         if isinstance(t, int): t = chr(t) # codepoint
         if self.selection.length == 0:
             self.text = self.text[:self.cursor.idx] + t + self.text[self.cursor.idx:]
@@ -499,10 +499,10 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
             text.selection.reset()
             text.goto(0)
             text.goto(len(text.text), selection=True)
-        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and text.selection.length > 0: text.clipboard = text.text[text.selection.start:text.selection.end] # copy
-        if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL and text.clipboard != None: text.write(text.clipboard) # paste
+        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and text.selection.length > 0: glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
+        if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: text.write(glfwGetClipboardString(window).decode()) # paste
         if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.length > 0: # cut
-            text.clipboard = text.text[text.selection.start:text.selection.end] # copy
+            glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
             text.erase()
         if key == GLFW_KEY_HOME: text.goto(text.cursor.line.start, allow_drift=True, left=True, selection=selection)
         if key == GLFW_KEY_END: text.goto(text.cursor.line.end, allow_drift=True, selection=selection) # TODO: double pressing home in wrapping lines, works, but not double pressing end

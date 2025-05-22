@@ -377,3 +377,5 @@ glfwSetScrollCallback = glfwfunc("glfwSetScrollCallback", GLFWscrollfun, [GLFWwi
 glfwGetCursorPos = glfwfunc("glfwGetCursorPos", None, [GLFWwindow, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)])
 
 glfwGetMouseButton = glfwfunc("glfwGetMouseButton", ctypes.c_int, [GLFWwindow, ctypes.c_int])
+glfwSetClipboardString = glfwfunc("glfwSetClipboardString", None, [GLFWwindow, ctypes.c_char_p])
+glfwGetClipboardString = glfwfunc("glfwGetClipboardString", ctypes.c_char_p, [GLFWwindow])
