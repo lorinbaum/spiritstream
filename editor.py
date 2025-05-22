@@ -135,7 +135,7 @@ class Cursor:
         if idx == self.idx: return
         self.idx = idx
         self.left = left
-        self.pos = vec2(0, cursorcoords[(self.idx + 1) % len(cursorcoords)].y) if left else cursorcoords[self.idx]
+        self.pos = vec2(-2, cursorcoords[(self.idx + 1) % len(cursorcoords)].y) if left else cursorcoords[self.idx]
         
         # scroll into view
         global SCROLLED
@@ -284,7 +284,7 @@ class Text:
         cursorcoords = []
         newline = True
         for i, char in enumerate(self.text):
-            cursorcoords.append((offset-vec2(2, 0)).copy()) # move cursor 1 pixel to left of char
+            cursorcoords.append((offset-vec2(2, 0)).copy()) # move cursor 2 pixel to left of char
             if ord(char) == 10:  # newline
                 self.lines.append(Line(newline, offset.y, 0 if len(self.lines) == 0 else self.lines[-1].end + (1 if newline else 0), i))
                 newline = True
@@ -312,8 +312,8 @@ class Text:
                 last-2, last-1, last    # triangle top right - bottom left - bottom right
             ]
             offset.x += g.advance
-        cursorcoords.append(offset.copy()) # first position after the last character
-        self.lines.append(Line(newline, offset.y, self.lines[-1].end if len(self.lines) > 0 else 0, len(cursorcoords)))
+        self.lines.append(Line(newline, offset.y, self.lines[-1].end + (1 if newline else 0) if len(self.lines) > 0 else 0, len(cursorcoords)))
+        cursorcoords.append((offset-vec2(2, 0)).copy()) # first position after the last character
         self.cursorcoords, self.indices = cursorcoords, indices
 
         glBindVertexArray(self.VAO)
@@ -504,8 +504,8 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.length > 0: # cut
             text.clipboard = text.text[text.selection.start:text.selection.end] # copy
             text.erase()
-        if key == GLFW_KEY_HOME: text.goto(text.cursor.line.start, left=True, selection=selection)
-        if key == GLFW_KEY_END: text.goto(text.cursor.line.end, selection=selection) # TODO: double pressing home in wrapping lines, works, but not double pressing end
+        if key == GLFW_KEY_HOME: text.goto(text.cursor.line.start, allow_drift=True, left=True, selection=selection)
+        if key == GLFW_KEY_END: text.goto(text.cursor.line.end, allow_drift=True, selection=selection) # TODO: double pressing home in wrapping lines, works, but not double pressing end
 
 @GLFWmousebuttonfun
 def mouse_callback(window, button:int, action:int, mods:int):
