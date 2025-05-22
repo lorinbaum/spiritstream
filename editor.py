@@ -12,6 +12,7 @@ DPI = 96
 WIDTH = 700
 HEIGHT = 1000
 RESIZED = True
+SCROLLED = False
 
 glfwInit()
 glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
@@ -81,6 +82,7 @@ class Cursor:
         self.left = None
         self.pos = vec2()
         self.idx = None
+        self.line = None
         self.x = 0 # Moving up and down using arrow keys can lead to drifting left or right. To avoid, stores original x in this variable.
     
         self.VBO, self.VAO, self.EBO = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
@@ -118,22 +120,32 @@ class Cursor:
             if not allow_drift: pos.x = self.x
             if pos.y > self.text.cursorcoords[-1].y + (self.text.atlas.tile.y * LINEHEIGHT) / 2: idx, allow_drift = len(self.text.cursorcoords) - 1, True
             elif pos.y < self.text.cursorcoords[0].y - (self.text.atlas.tile.y * LINEHEIGHT) / 2: idx, allow_drift = 0, True
-            else: 
-                closest = vec2(math.inf, math.inf)
-                for i, c in enumerate(self.text.cursorcoords):
-                    if (d:=(pos-c).abs()).y <= closest.y:
-                        if d.x < closest.x or d.y < closest.y: idx, closest, left = i, d.copy(), False
-                        # if this cursor position can be either up or down, check which is closer and take that one. if I take the down one, set left to True
-                        if i in (l.idx for l in text.lines if not l.newline) and i < len(self.text.cursorcoords) - 1:
-                            d0 = (pos - vec2(2, self.text.cursorcoords[i+1].y)).abs()
-                            if d0.y <= closest.y:
-                                if d0.y < closest.y or d0.x < closest.x: idx, closest, left = i, d0.copy(), True
+            else:
+                closest_x = closest_y = math.inf
+                for i, l in enumerate(self.text.visible_lines):
+                    if (dy:=abs(pos.y - l.y)) < closest_y: closest_y, self.line = dy, l
                     else: break
-        else: idx = pos % len(cursorcoords)
+                for i, c in enumerate([vec2(-2.01, None)] + self.text.cursorcoords[self.line.start+1:self.line.end+1]):
+                    if (dx:=abs(pos.x - c.x)) < closest_x:
+                        closest_x, idx, left = dx, self.line.start + i, i == 0 and not self.line.newline
+                    else: break
+        else:
+            idx = pos % len(cursorcoords)
+            self.line = next((l for l in self.text.lines if l.start <= idx <= l.end))
         if idx == self.idx: return
         self.idx = idx
         self.left = left
         self.pos = vec2(0, cursorcoords[(self.idx + 1) % len(cursorcoords)].y) if left else cursorcoords[self.idx]
+        
+        # scroll into view
+        global SCROLLED
+        if self.pos.y - self.text.atlas.tile.y * LINEHEIGHT < self.text.y:
+            self.text.y = self.pos.y - self.text.atlas.tile.y * LINEHEIGHT
+            SCROLLED = True
+        elif self.pos.y + self.text.atlas.origin.y > self.text.y + HEIGHT:
+            self.text.y = self.pos.y - HEIGHT + self.text.atlas.origin.y
+            SCROLLED = True
+
         g = self.text.atlas["|"]
         vertices = [
             # x,y                                            z    texture
@@ -150,17 +162,11 @@ class Cursor:
         glBufferSubData(GL_ARRAY_BUFFER, 0, 80, vertices_ctypes)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-# todo: put lines into Text.lines and use these instead of linewraps for cursor positioning
-@dataclass
-class Line:
-    newline:bool # if True, line terminates with "\n", else it wraps around into the next
-    y:float
-    idx:int
 
 class Selection:
     def __init__(self, text:"Text"):
         self.text = text
-        self.start = self.end = self.pos1 = self.pos1left = None
+        self.start = self.startleft = self.end = self.endleft = self.pos1 = self.pos1left = None
         self.quads = 100 # preallocates for this many. reallocates if necessary
         self.length = 0 # number of quads to actually draw
         
@@ -185,15 +191,19 @@ class Selection:
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
     
-    def update(self, pos1, left1, pos2, left2):
-        if self.pos1 == None: self.pos1, self.pos1left = pos1, left1
-        self.start, self.startleft, self.end, self.endleft = (self.pos1, left1, pos2, left2) if self.pos1 < pos2 else (pos2, left2, self.pos1, left1)
-        if self.start == self.end: return self.reset()
+    def update(self, pos1=None, left1=None, pos2=None, left2=None):
+        if pos1 == left1 == pos2 == left2 == None: # all are set or none are set. this allows calling selection.update() to rerender it
+            assert all([i != None for i in [self.pos1, self.pos1left, self.start, self.startleft, self.end, self.endleft]])
+            pos1, left1, pos2, left2 = self.start, self.startleft, self.end, self.endleft
+        else:
+            assert all([i != None for i in [pos1, left1, pos2, left2]])
+            if self.pos1 == None: self.pos1, self.pos1left = pos1, left1
+            self.start, self.startleft, self.end, self.endleft = (self.pos1, left1, pos2, left2) if self.pos1 < pos2 else (pos2, left2, self.pos1, left1)
+            if self.start == self.end: return self.reset()
         vertices = []
-        relevant_lines = (l for l in self.text.lines if self.text.y + HEIGHT >= l.y > self.text.y and l.idx >= self.start) # visible and after start
-        for i, l in enumerate(relevant_lines):
-            if i == 0:
-                if self.startleft and l.idx == self.start: continue
+        for i, l in enumerate((l for l in self.text.visible_lines if l.end >= self.start)):
+            if i == 0 and l.start <= self.start:
+                if self.startleft and l.end == self.start: continue
                 vertices.extend([
                     *(self.text.cursorcoords[self.start] + (self.text.atlas.origin * vec2(-1, 1))).components(),                                   0,
                     *(self.text.cursorcoords[self.start] + (self.text.atlas.origin * vec2(-1, 1)) - vec2(0, self.text.atlas.tile.y)).components(), 0,
@@ -203,7 +213,7 @@ class Selection:
                     *(vec2(0, l.y) + (self.text.atlas.origin * vec2(-1, 1))).components(),                          0,
                     *(vec2(0, l.y - self.text.atlas.tile.y) + (self.text.atlas.origin * vec2(-1, 1))).components(), 0
                 ])
-            if self.end <= l.idx:
+            if self.end <= l.end:
                 vertices.extend([
                     *(self.text.cursorcoords[self.end] + (self.text.atlas.origin * vec2(-1, 1))).components(),                                   0,
                     *(self.text.cursorcoords[self.end] - vec2(0, self.text.atlas.tile.y) + (self.text.atlas.origin * vec2(-1, 1))).components(), 0,
@@ -211,8 +221,8 @@ class Selection:
                 break
             else:
                 vertices.extend([
-                    *(self.text.cursorcoords[l.idx] + vec2(5, 0) + (self.text.atlas.origin * vec2(-1, 1))).components(),                       0,
-                    *(self.text.cursorcoords[l.idx] - vec2(-5, self.text.atlas.tile.y) + (self.text.atlas.origin * vec2(-1, 1))).components(), 0,
+                    *(self.text.cursorcoords[l.end] + vec2(5, 0) + (self.text.atlas.origin * vec2(-1, 1))).components(),                       0,
+                    *(self.text.cursorcoords[l.end] - vec2(-5, self.text.atlas.tile.y) + (self.text.atlas.origin * vec2(-1, 1))).components(), 0,
                 ])
         assert len(vertices) < self.quads*12, "buffer extension not yet supported"
         assert len(vertices) % 12 == 0
@@ -226,6 +236,13 @@ class Selection:
     def reset(self):
         self.length = 0
         self.start = self.end = self.pos1 = self.startleft = self.pos1left = self.endleft = None
+
+@dataclass
+class Line:
+    newline:bool # if True, line was preceeded by "\n", else its a continuation of the previous one
+    y:float
+    start:int # cursor idx where line starts
+    end:int
 
 class Text:
     def __init__(self, text:str, atlas:GlyphAtlas):
@@ -256,26 +273,32 @@ class Text:
         if selection: self.selection.update(oldidx, oldleft, self.cursor.idx, self.cursor.left)
         else: self.selection.reset()
 
+    @property
+    def visible_lines(self): return (l for l in self.lines if self.y + HEIGHT + self.atlas.tile.y * LINEHEIGHT >= l.y > self.y - self.atlas.tile.y * LINEHEIGHT)
+
     def update(self):
         self.lines = []
         vertices = []
         indices = []
         offset = vec2(0, self.atlas.tile.y) # bottom left corner of a character that is guaranteed to fit vertically in the top row 
         cursorcoords = []
+        newline = True
         for i, char in enumerate(self.text):
-            cursorcoords.append((offset-vec2(2/WIDTH, 0)).copy()) # move cursor 1 pixel to left of char
+            cursorcoords.append((offset-vec2(2, 0)).copy()) # move cursor 1 pixel to left of char
             if ord(char) == 10:  # newline
-                self.lines.append(Line(True, offset.y, i))
+                self.lines.append(Line(newline, offset.y, 0 if len(self.lines) == 0 else self.lines[-1].end + (1 if newline else 0), i))
+                newline = True
                 offset = vec2(0, offset.y+self.atlas.tile.y*LINEHEIGHT)
                 continue
             g = self.atlas[char]
+            if offset.x + g.advance > self.width:
+                assert i > 0
+                self.lines.append(Line(newline, offset.y, 0 if i == 0 else self.lines[-1].end + (1 if newline else 0), i))
+                newline = False
+                offset = vec2(0, offset.y+self.atlas.tile.y*LINEHEIGHT) # new line, no word splitting
             if ord(char) == 32: # space
                 offset.x += g.advance
                 continue
-            if offset.x + g.advance > self.width:
-                assert i > 0
-                self.lines.append(Line(False, offset.y, i))
-                offset = vec2(0, offset.y+self.atlas.tile.y*LINEHEIGHT) # new line, no word splitting
             vertices += [
                 # x                                     y                                       z  texture
                 (top_left_x := offset.x + g.bearing.x), (top_left_y := offset.y - g.bearing.y), 0, *g.texture_coords[0].components(), # top left
@@ -289,8 +312,8 @@ class Text:
                 last-2, last-1, last    # triangle top right - bottom left - bottom right
             ]
             offset.x += g.advance
-        self.lines.append(Line(True, offset.y, len(cursorcoords)))
         cursorcoords.append(offset.copy()) # first position after the last character
+        self.lines.append(Line(newline, offset.y, self.lines[-1].end if len(self.lines) > 0 else 0, len(cursorcoords)))
         self.cursorcoords, self.indices = cursorcoords, indices
 
         glBindVertexArray(self.VAO)
@@ -453,8 +476,6 @@ void main()
     FragColor = vec4(selectionColor, 1.0);
 }"""
 selectionShader = Shader(vertex_shader_source, fragment_shader_source, ["selectionColor", "offset", "scale"])
-selectionShader.setUniform("selectionColor", (0x61 / 0xff, 0x48 / 0xff, 0x3d / 0xff), "3f")
-selectionShader.setUniform("selectionColor", (0x4a / 0xff, 0x34 / 0xff, 0x2a / 0xff), "3f")
 selectionShader.setUniform("selectionColor", (0x42 / 0xff, 0x30 / 0xff, 0x24 / 0xff), "3f")
 
 @GLFWcharfun
@@ -464,7 +485,7 @@ def char_callback(window, codepoint): text.write(codepoint)
 def key_callback(window, key:int, scancode:int, action:int, mods:int):
     if action in [GLFW_PRESS, GLFW_REPEAT]:
         selection = bool(mods & GLFW_MOD_SHIFT)
-        if key == GLFW_KEY_LEFT: text.goto(text.selection.start) if text.selection.start != None and not selection else text.goto(text.cursor.idx - 1, left=text.cursor.idx-1 in (l.idx for l in text.lines if not l.newline), selection=selection)
+        if key == GLFW_KEY_LEFT: text.goto(text.selection.start) if text.selection.start != None and not selection else text.goto(text.cursor.idx - 1, left=text.cursor.idx - 1 == text.cursor.line.start and not text.cursor.line.newline, selection=selection)
         if key == GLFW_KEY_RIGHT: text.goto(text.selection.end) if text.selection.end != None and not selection else text.goto(text.cursor.idx+1, selection=selection)
         if key == GLFW_KEY_UP: text.goto(text.cursor.pos - vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, selection=selection)
         if key == GLFW_KEY_DOWN: text.goto(text.cursor.pos + vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, selection=selection)
@@ -483,27 +504,34 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.length > 0: # cut
             text.clipboard = text.text[text.selection.start:text.selection.end] # copy
             text.erase()
-        if key == GLFW_KEY_HOME: text.goto(next((vec2(0, l.y) for l in text.lines if l.idx > text.cursor.idx or (l.idx == text.cursor.idx and not text.cursor.left))), left=True, selection=selection)
-        if key == GLFW_KEY_END: text.goto(next((vec2(text.width, l.y) for l in text.lines if l.idx > text.cursor.idx or (l.idx == text.cursor.idx and not text.cursor.left))), left=False, selection=selection)
+        if key == GLFW_KEY_HOME: text.goto(text.cursor.line.start, left=True, selection=selection)
+        if key == GLFW_KEY_END: text.goto(text.cursor.line.end, selection=selection) # TODO: double pressing home in wrapping lines, works, but not double pressing end
 
 @GLFWmousebuttonfun
 def mouse_callback(window, button:int, action:int, mods:int):
     if button == GLFW_MOUSE_BUTTON_1 and action in [GLFW_PRESS, GLFW_RELEASE]:
         x, y = ctypes.c_double(), ctypes.c_double()
         glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-        text.goto(vec2(x.value - text.x, y.value), selection=action == GLFW_RELEASE) # adjust for offset vector
+        text.goto(vec2(x.value - text.x, y.value + text.y), selection=action == GLFW_RELEASE or glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) # adjust for offset vector
 
 @GLFWcursorposfun
 def cursor_pos_callback(window, x, y):
     if glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS:
         x, y = ctypes.c_double(), ctypes.c_double()
         glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-        text.goto(vec2(x.value - text.x, y.value), selection=True) # adjust for offset vector
+        text.goto(vec2(x.value - text.x, y.value + text.y), selection=True) # adjust for offset vector
+
+@GLFWscrollfun
+def scroll_callback(window, x, y):
+    global SCROLLED
+    text.y -= y * 40
+    SCROLLED = True
 
 glfwSetCharCallback(window, char_callback)
 glfwSetKeyCallback(window, key_callback)
 glfwSetMouseButtonCallback(window, mouse_callback)
 glfwSetCursorPosCallback(window, cursor_pos_callback)
+glfwSetScrollCallback(window, scroll_callback)
 
 fps = None
 frame_count = 0
@@ -528,6 +556,10 @@ while not glfwWindowShouldClose(window):
         offset_vector = vec2(text.x * 2 / WIDTH, text.y * 2 / HEIGHT) # offset applied to all objects. unit in opengl coordinates
         RESIZED = False
         glViewport(0, 0, WIDTH, HEIGHT)
+    if SCROLLED:
+        offset_vector = vec2(text.x * 2 / WIDTH, text.y * 2 / HEIGHT) # offset applied to all objects. unit in opengl coordinates
+        if text.selection.length > 0: text.selection.update()
+        SCROLLED = False
     
     glClear(GL_COLOR_BUFFER_BIT)
     

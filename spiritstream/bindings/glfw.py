@@ -355,6 +355,7 @@ GLFWkeyfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int, ctyp
 GLFWframebuffersizefun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int)
 GLFWmousebuttonfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_int, ctypes.c_int, ctypes.c_int)
 GLFWcursorposfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_double, ctypes.c_double)
+GLFWscrollfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_double, ctypes.c_double)
 
 glfwInit = glfwfunc("glfwInit", ctypes.c_int, [])
 glfwWindowHint = glfwfunc("glfwWindowHint", None, [ctypes.c_int, ctypes.c_int])
@@ -372,6 +373,7 @@ glfwSetKeyCallback = glfwfunc("glfwSetKeyCallback", GLFWkeyfun, [GLFWwindow, GLF
 glfwSetFramebufferSizeCallback = glfwfunc("glfwSetFramebufferSizeCallback", GLFWframebuffersizefun, [GLFWwindow, GLFWframebuffersizefun])
 glfwSetMouseButtonCallback = glfwfunc("glfwSetMouseButtonCallback", GLFWmousebuttonfun, [GLFWwindow, GLFWmousebuttonfun])
 glfwSetCursorPosCallback = glfwfunc("glfwSetCursorPosCallback", GLFWcursorposfun, [GLFWwindow, GLFWcursorposfun])
+glfwSetScrollCallback = glfwfunc("glfwSetScrollCallback", GLFWscrollfun, [GLFWwindow, GLFWscrollfun])
 glfwGetCursorPos = glfwfunc("glfwGetCursorPos", None, [GLFWwindow, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)])
 
 glfwGetMouseButton = glfwfunc("glfwGetMouseButton", ctypes.c_int, [GLFWwindow, ctypes.c_int])
