@@ -71,7 +71,6 @@ class Node:
 class HTMLNode(Node):
     start:int = None
     end:int = None
-    text:Optional[str]=None # TODO: remove. text are children nodes
     
     def __repr__(self): return  f"\033[32m{self.__class__.__name__}\033[0m({self.name}, \033[94mstart=\033[0m{self.start}, \033[94mend=\033[0m{self.end}, \033[94mdata=\033[0m{self.data})"
 
@@ -175,7 +174,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
 
             case "text" if not (node.name in ["empty_line", "codeblock"] and tok.data - tok.idx == 1): # text will match newline at end of empty_line and codeblock which is useless
                 if node.children and (n:=node.children[-1]).name == "text" and n.end == tok.idx: n.end = tok.data # merge with previous text if contiguous
-                else: node.children.append(HTMLNode("text", node, [], tok.data, tok.idx))
+                else: node.children.append(HTMLNode("text", node, [], None, tok.idx, tok.data))
 
             case _ if not inlink or node.data == "md": # inline formatting only allowed outside of links except in the label part of a markdown link                
                 match tok.name:
