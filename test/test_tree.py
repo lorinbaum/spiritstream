@@ -1,5 +1,6 @@
+from pathlib import Path
 import unittest
-from spiritstream.tree import treeify, tokenize, walk, serialize, show, parse
+from spiritstream.tree import treeify, tokenize, walk, serialize, tokenizeCSS, show, parse, Status
 from spiritstream.config import SPACES
 
 TEST_CASES = [
@@ -473,11 +474,11 @@ TEST_CASES = [
 class test_ast_tokenizer(unittest.TestCase):
     def test_cases(self):
         for c in TEST_CASES:
-        # for c in TEST_CASES[7:8]:
             with self.subTest(c = c["name"]):
                 for markdown in (c["md"] if isinstance(c["md"], list) else [c["md"]]):
-                    # print(*tokenize(markdown), sep="\n")
-                    # show(parse(markdown))
+                    # if c["name"] == "unordered list":
+                    #     print(*tokenize(markdown), sep="\n")
+                    #     show(parse(markdown))
                     tokens = list(t for t in tokenize(markdown) if t.name != "text") # ignoring text tokens for now
                     for i, (tok, truetok) in enumerate(zip(tokens, c["tokens"])):
                         if "name" in truetok: self.assertEqual(tok.name, truetok["name"], (i, tokens))
@@ -499,5 +500,18 @@ class test_ast_tokenizer(unittest.TestCase):
                     # head2 = parse(markdown)
                     # show(head2)
                     # print(serialize(head2, markdown))
+
+class test_css_tokenizer(unittest.TestCase):
+    def test_all(self):
+        with open(Path(__file__).parent / "test.css", "r") as f: css = f.read()
+        tree = tokenizeCSS(css)
+        # show(tree)
+
+        for node in walk(tree):
+            if node.children:
+                for child in node.children:
+                    self.assertIs(node, child.parent)
+            if node.parent: self.assertTrue(any(node is c for c in node.parent.children))
+            self.assertIs(node.status, Status.CLOSED)
 
 if  __name__ == "__main__": unittest.main()
