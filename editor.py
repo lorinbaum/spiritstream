@@ -6,28 +6,6 @@ from spiritstream.font import Font
 from typing import Union, List
 from dataclasses import dataclass
 
-FONTSIZE = 12
-LINEHEIGHT = 1.5
-DPI = 96
-WIDTH = 700
-HEIGHT = 1000
-RESIZED = True
-SCROLLED = False
-
-glfwInit()
-glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
-glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
-glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
-glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, True)
-window = glfwCreateWindow(WIDTH, HEIGHT, b"Spiritstream", None, None)
-glfwMakeContextCurrent(window)
-
-@GLFWframebuffersizefun
-def framebuffer_size_callback(window, width, height):
-    global WIDTH, HEIGHT, RESIZED
-    WIDTH, HEIGHT, RESIZED = width, height, True
-glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
-
 class GlyphAtlas:
     def __init__(self, chars:set, F:Font, size:int, dpi:int):
         self.glyphs = {c: F.render(c, FONTSIZE, DPI) for c in chars}
@@ -361,9 +339,6 @@ class Text:
             self.cursor.update(self.selection.start)
             self.selection.reset()
 
-glyph_atlas = GlyphAtlas(set([chr(i) for i in range(32,128)] + list("öäüß")), Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf"), FONTSIZE, DPI)
-with open("text.txt", "r") as f: text = Text(f.read(), glyph_atlas)
-
 class Shader:
     def __init__(self, vertex_shader_source:str, fragment_shader_source:str, uniforms:List[str]):
         vertex_shader = self._compile(GL_VERTEX_SHADER, vertex_shader_source)
@@ -421,6 +396,86 @@ class Shader:
             raise RuntimeError(f"Shader compilation failed: {error_log.value.decode()}")
         return shader_id
 
+@GLFWframebuffersizefun
+def framebuffer_size_callback(window, width, height):
+    global WIDTH, HEIGHT, RESIZED
+    WIDTH, HEIGHT, RESIZED = width, height, True
+
+@GLFWcharfun
+def char_callback(window, codepoint): text.write(codepoint)
+
+@GLFWkeyfun
+def key_callback(window, key:int, scancode:int, action:int, mods:int):
+    if action in [GLFW_PRESS, GLFW_REPEAT]:
+        selection = bool(mods & GLFW_MOD_SHIFT)
+        if key == GLFW_KEY_LEFT: text.goto(text.selection.start) if text.selection.start != None and not selection else text.goto(text.cursor.idx - 1, left=text.cursor.idx - 1 == text.cursor.line.start and not text.cursor.line.newline, selection=selection)
+        if key == GLFW_KEY_RIGHT: text.goto(text.selection.end) if text.selection.end != None and not selection else text.goto(text.cursor.idx+1, selection=selection)
+        if key == GLFW_KEY_UP: text.goto(text.cursor.pos - vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, selection=selection)
+        if key == GLFW_KEY_DOWN: text.goto(text.cursor.pos + vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, selection=selection)
+        if key == GLFW_KEY_BACKSPACE: text.erase()
+        if key == GLFW_KEY_DELETE: text.erase(right=True)
+        if key == GLFW_KEY_ENTER: text.write(ord("\n"))
+        if key == GLFW_KEY_S:
+            if mods & GLFW_MOD_CONTROL: # SAVE
+                with open("text.txt", "w") as f: f.write(text.text)
+        if key == GLFW_KEY_A and mods & GLFW_MOD_CONTROL:  # select all
+            text.selection.reset()
+            text.goto(0)
+            text.goto(len(text.text), selection=True)
+        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and text.selection.length > 0: glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
+        if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: text.write(glfwGetClipboardString(window).decode()) # paste
+        if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.length > 0: # cut
+            glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
+            text.erase()
+        if key == GLFW_KEY_HOME: text.goto(text.cursor.line.start, allow_drift=True, left=True, selection=selection)
+        if key == GLFW_KEY_END: text.goto(text.cursor.line.end, allow_drift=True, selection=selection) # TODO: double pressing home in wrapping lines, works, but not double pressing end
+
+@GLFWmousebuttonfun
+def mouse_callback(window, button:int, action:int, mods:int):
+    if button == GLFW_MOUSE_BUTTON_1 and action in [GLFW_PRESS, GLFW_RELEASE]:
+        x, y = ctypes.c_double(), ctypes.c_double()
+        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
+        text.goto(vec2(x.value - text.x, y.value + text.y), selection=action == GLFW_RELEASE or glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) # adjust for offset vector
+
+@GLFWcursorposfun
+def cursor_pos_callback(window, x, y):
+    if glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS:
+        x, y = ctypes.c_double(), ctypes.c_double()
+        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
+        text.goto(vec2(x.value - text.x, y.value + text.y), selection=True) # adjust for offset vector
+
+@GLFWscrollfun
+def scroll_callback(window, x, y):
+    global SCROLLED
+    text.y -= y * 40
+    SCROLLED = True
+
+FONTSIZE = 12
+LINEHEIGHT = 1.5
+DPI = 96
+WIDTH = 700
+HEIGHT = 1000
+RESIZED = True
+SCROLLED = False
+
+glfwInit()
+glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
+glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
+glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
+glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, True)
+window = glfwCreateWindow(WIDTH, HEIGHT, b"Spiritstream", None, None)
+glfwMakeContextCurrent(window)
+
+glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
+glfwSetCharCallback(window, char_callback)
+glfwSetKeyCallback(window, key_callback)
+glfwSetMouseButtonCallback(window, mouse_callback)
+glfwSetCursorPosCallback(window, cursor_pos_callback)
+glfwSetScrollCallback(window, scroll_callback)
+
+glyph_atlas = GlyphAtlas(set([chr(i) for i in range(32,128)] + list("öäüß")), Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf"), FONTSIZE, DPI)
+with open("text.txt", "r") as f: text = Text(f.read(), glyph_atlas)
+
 vertex_shader_source = """
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -477,61 +532,6 @@ void main()
 }"""
 selectionShader = Shader(vertex_shader_source, fragment_shader_source, ["selectionColor", "offset", "scale"])
 selectionShader.setUniform("selectionColor", (0x42 / 0xff, 0x30 / 0xff, 0x24 / 0xff), "3f")
-
-@GLFWcharfun
-def char_callback(window, codepoint): text.write(codepoint)
-
-@GLFWkeyfun
-def key_callback(window, key:int, scancode:int, action:int, mods:int):
-    if action in [GLFW_PRESS, GLFW_REPEAT]:
-        selection = bool(mods & GLFW_MOD_SHIFT)
-        if key == GLFW_KEY_LEFT: text.goto(text.selection.start) if text.selection.start != None and not selection else text.goto(text.cursor.idx - 1, left=text.cursor.idx - 1 == text.cursor.line.start and not text.cursor.line.newline, selection=selection)
-        if key == GLFW_KEY_RIGHT: text.goto(text.selection.end) if text.selection.end != None and not selection else text.goto(text.cursor.idx+1, selection=selection)
-        if key == GLFW_KEY_UP: text.goto(text.cursor.pos - vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, selection=selection)
-        if key == GLFW_KEY_DOWN: text.goto(text.cursor.pos + vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, selection=selection)
-        if key == GLFW_KEY_BACKSPACE: text.erase()
-        if key == GLFW_KEY_DELETE: text.erase(right=True)
-        if key == GLFW_KEY_ENTER: text.write(ord("\n"))
-        if key == GLFW_KEY_S:
-            if mods & GLFW_MOD_CONTROL: # SAVE
-                with open("text.txt", "w") as f: f.write(text.text)
-        if key == GLFW_KEY_A and mods & GLFW_MOD_CONTROL:  # select all
-            text.selection.reset()
-            text.goto(0)
-            text.goto(len(text.text), selection=True)
-        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and text.selection.length > 0: glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
-        if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: text.write(glfwGetClipboardString(window).decode()) # paste
-        if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.length > 0: # cut
-            glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
-            text.erase()
-        if key == GLFW_KEY_HOME: text.goto(text.cursor.line.start, allow_drift=True, left=True, selection=selection)
-        if key == GLFW_KEY_END: text.goto(text.cursor.line.end, allow_drift=True, selection=selection) # TODO: double pressing home in wrapping lines, works, but not double pressing end
-
-@GLFWmousebuttonfun
-def mouse_callback(window, button:int, action:int, mods:int):
-    if button == GLFW_MOUSE_BUTTON_1 and action in [GLFW_PRESS, GLFW_RELEASE]:
-        x, y = ctypes.c_double(), ctypes.c_double()
-        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-        text.goto(vec2(x.value - text.x, y.value + text.y), selection=action == GLFW_RELEASE or glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) # adjust for offset vector
-
-@GLFWcursorposfun
-def cursor_pos_callback(window, x, y):
-    if glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS:
-        x, y = ctypes.c_double(), ctypes.c_double()
-        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-        text.goto(vec2(x.value - text.x, y.value + text.y), selection=True) # adjust for offset vector
-
-@GLFWscrollfun
-def scroll_callback(window, x, y):
-    global SCROLLED
-    text.y -= y * 40
-    SCROLLED = True
-
-glfwSetCharCallback(window, char_callback)
-glfwSetKeyCallback(window, key_callback)
-glfwSetMouseButtonCallback(window, mouse_callback)
-glfwSetCursorPosCallback(window, cursor_pos_callback)
-glfwSetScrollCallback(window, scroll_callback)
 
 fps = None
 frame_count = 0
