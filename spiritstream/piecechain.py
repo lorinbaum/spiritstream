@@ -9,7 +9,7 @@ class Piece:
     prev:Optional["Piece"] = None
     next:Optional["Piece"] = None
 
-class PieceTable:
+class PieceChain:
     def __init__(self, text):
         self.original = text
         self.add = ""

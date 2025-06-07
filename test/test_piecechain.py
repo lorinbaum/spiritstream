@@ -1,7 +1,7 @@
 import unittest
-from spiritstream.piecetable import PieceTable
+from spiritstream.piecechain import PieceChain
 
-def check_piece_chain_integrity(p:PieceTable):
+def check_piece_chain_integrity(p:PieceChain):
     node = p.head
     prev = None
     visited = set()
@@ -18,8 +18,8 @@ def check_piece_chain_integrity(p:PieceTable):
         prev = node
         node = node.next
 
-class Test_piecetable(unittest.TestCase):
-    def setUp(self): self.P = PieceTable("example text")
+class Test_PieceChain(unittest.TestCase):
+    def setUp(self): self.P = PieceChain("example text")
     def tearDown(self): check_piece_chain_integrity(self.P)
     
     def test_insert_start(self):
