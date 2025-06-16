@@ -213,9 +213,8 @@ class longHorMetric(table):
 
 class glyf(table):
     class glyphPoint(vec2):
-        def __init__(self, x:int, y:int, onCurve:bool, touched:bool=False):
+        def __init__(self, x:int, y:int, onCurve:bool):
             self.onCurve = onCurve
-            self.touched = touched
             self.x, self.y = x, y
         def __repr__(self): return f"glyphPoint({self.x=}, {self.y=}, {self.onCurve=})"
     def _from_bytes(self, b:Parser):
@@ -287,12 +286,9 @@ class glyf(table):
                     self.instructionLength = b.parse(uint16)
                     self.instructions = b.parse(uint8, count=self.instructionLength)
     
-    def get_point(self, i:int, outline:str="original") -> glyphPoint:
-        assert outline in ["original", "fitted"]
-        if outline == "original": x, y = self.scaled_x, self.scaled_y
-        else: x,y = self.fitted_x, self.fitted_y
-        assert len(x) > i >= 0, f"Error: invalid index {i=}"
-        return self.glyphPoint(x[i], y[i], bool(self.flags[i] & 0x01) if i < len(self.flags) else False, self.touched[i]) # onCurve is always False for phantom points
+    def get_point(self, i:int) -> glyphPoint:
+        assert len(self.x) > i >= 0, f"Error: invalid index {i=}"
+        return self.glyphPoint(self.x[i], self.y[i], bool(self.flags[i] & 0x01) if i < len(self.flags) else False) # onCurve is always False for phantom points
 
 class glyphComponent(table):
     masks = {
