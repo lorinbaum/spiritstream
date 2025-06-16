@@ -288,7 +288,7 @@ class glyf(table):
     
     def get_point(self, i:int) -> glyphPoint:
         assert len(self.x) > i >= 0, f"Error: invalid index {i=}"
-        return self.glyphPoint(self.x[i], self.y[i], bool(self.flags[i] & 0x01) if i < len(self.flags) else False) # onCurve is always False for phantom points
+        return self.glyphPoint(self.x[i], self.y[i], bool(self.flags[i] & 0x01))
 
 class glyphComponent(table):
     masks = {

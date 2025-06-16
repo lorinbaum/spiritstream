@@ -42,8 +42,6 @@ class Interpreter:
             print(f"Contains tables: {list(self.table_directory.keys())}")
             assert all((cs:=self.checksum(p.b))), f"Checksum failed: {cs}"
         del p
-        
-        self.g:glyf = None # stores currently loaded glyph
 
         self.fontsize = self.dpi = None # TODO: get value from screen device
 
@@ -67,12 +65,6 @@ class Interpreter:
 
         return (from_and_to_bytes, magic_number, head_checksum, reconstrucion, file_checksum)
     
-    def get_point(self, point_index:int, zone_pointer:str, outline:str="original"):
-        assert zone_pointer in ["zp0", "zp1", "zp2"]
-        zp = self.gs[zone_pointer]
-        if zp == 0: return self.twilight[point_index]
-        else: return self.g.get_point(point_index, outline)
-
     def getGlyph(self, unicode:int=None, fontsize=None, dpi=None, glyphIndex=None, antialiasing=0):
         self.antialiasing = antialiasing
         assert (unicode != None and isinstance(unicode, int)) or glyphIndex != None
@@ -84,13 +76,9 @@ class Interpreter:
         else: self.fontsize = fontsize
 
         glyphIndex = glyphIndex if glyphIndex != None else self.cmap.subtable.getGlyphIndex(unicode)
-
-        self.hint(glyphIndex)
-        self.g.bitmap = self.scan_convert()
-        # return bitmap
+        return self.scan_convert(self.hint(glyphIndex))
 
     def hint(self, glyphIndex, is_child=False) -> glyf:
-        """ Populates self.g.x, self.g.y """
         glyph = glyf(self.glyf[self.loca[glyphIndex]:self.loca[glyphIndex+1]]) if glyphIndex + 1 < len(self.loca) else glyf(self.glyf[self.loca[glyphIndex]:])
         if hasattr(glyph, "children"): # compound glyph
             for child in glyph.children: # child is glyphComponent object
@@ -114,10 +102,7 @@ class Interpreter:
                     else: offset = transform(vec2(child.arg1, child.arg2), xscale, yscale, scale01, scale10)
                     offset = vec2(FU_to_px(self, child.arg1), FU_to_px(self, child.arg2))
                     if child.ROUND_XY_TO_GRID: offset = vec2((offset.x + 0.5)//1, (offset.y + 0.5) // 1) # round to grid
-                else:
-                    p1, p2 = glyph.get_point(child.arg1), child_glyph.get_point(child.arg2)
-                    p1, p2 = vec2(p1.x, p1.y), vec2(p2.x, p2.y)
-                    offset = p1 - p2
+                else: offset = glyph.get_point(child.arg1) - child_glyph.get_point(child.arg2)
                 # apply offset
                 child_glyph.x = [x + offset.x for x in child_glyph.x]
                 child_glyph.y = [y + offset.y for y in child_glyph.y]
@@ -142,20 +127,19 @@ class Interpreter:
         
         if is_child == False and self.head.flags & 2: glyph.x = [x - glyph.leftSideBearing for x in glyph.x] # this flag means left side bearing should be aligned with x = 0. only applies when not dealing with compound glyph components
         
-        self.g = glyph
-        return self.g
+        return glyph
 
-    def scan_convert(self) -> List[List[int]]:
+    def scan_convert(self, g:glyf) -> List[List[int]]:
         """
-        Returns a 2D list of rendered pixels (Row-major) of the current glyph in self.g.
+        Returns a 2D list of rendered pixels (Row-major) of the current glyph in g.
         Uses the non-zero winding number rule, which means: for each pixel, go right and on each intersection with any contour segment, determine the gradient at that point. if the gradient points up, add 1, else sub 1. If the result is zero, the point is outside, else, its inside
         """
-        pts = [self.g.get_point(i) for i in range(self.g.endPtsContours[-1] + 1)] if self.g.endPtsContours != [] else [glyf.glyphPoint(0, 0, False)] # default 0 to return a bitmap of 0
+        pts = [g.get_point(i) for i in range(g.endPtsContours[-1] + 1)] if g.endPtsContours != [] else [glyf.glyphPoint(0, 0, False)] # default 0 to return a bitmap of 0
         assert isinstance(self.antialiasing, int)
         xs, ys = [p.x for p in pts], [p.y for p in pts]
         minX, maxX = math.floor(min(xs)), math.ceil(max(xs))
         minY, maxY = math.floor(min(ys)), math.ceil(max(ys))
-        self.g.bearing = vec2(math.floor(self.g.leftSideBearing) + minX, maxY)
+        g.bearing = vec2(math.floor(g.leftSideBearing) + minX, maxY)
         width = maxX - minX
         height = maxY - minY
         if self.antialiasing > 1:
@@ -166,12 +150,12 @@ class Interpreter:
         # add oncurve points between consecutive control points
         all_contours = [] # first point will exist twice. at 0 and -1
         start = 0
-        for ep in self.g.endPtsContours:
+        for ep in g.endPtsContours:
             this_contour = []
             contour = pts[start:ep+1]
             for p1, p2 in zip(contour, contour[1:] + [contour[0]]):
                 this_contour.append(p1)
-                if p1.onCurve == p2.onCurve: this_contour.append(self.g.glyphPoint(p1.x + (p2.x-p1.x)/2, p1.y + (p2.y-p1.y) / 2, True)) # add another point inbetween. if two consecutive offcurve points, add an oncurve one to keep the curves quadratic. if two oncurve ones, add one so the segments are always 3 points: easy to handle.
+                if p1.onCurve == p2.onCurve: this_contour.append(g.glyphPoint(p1.x + (p2.x-p1.x)/2, p1.y + (p2.y-p1.y) / 2, True)) # add another point inbetween. if two consecutive offcurve points, add an oncurve one to keep the curves quadratic. if two oncurve ones, add one so the segments are always 3 points: easy to handle.
             start = ep+1
             this_contour.append(contour[0])
             assert len(this_contour) % 2 == 1
@@ -217,5 +201,6 @@ class Interpreter:
                     values = [bitmap[ny][nx] for ny in range(y, y+self.antialiasing) for nx in range(x,x+self.antialiasing)]
                     nx, ny = int(x // self.antialiasing), int(y // self.antialiasing)
                     new_bitmap[ny][nx] = sum(values) / len(values)
-            return new_bitmap
-        return bitmap
+            bitmap = new_bitmap
+        g.bitmap = bitmap
+        return g
