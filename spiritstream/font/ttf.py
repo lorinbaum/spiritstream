@@ -137,7 +137,7 @@ class TTF:
         if is_child == False and self.head.flags & 2: glyph.x = [x - glyph.leftSideBearing for x in glyph.x] # this flag means left side bearing should be aligned with x = 0. only applies when not dealing with compound glyph components
         return glyph
 
-    def rasterize(self, g:glyf) -> List[List[int]]:
+    def rasterize(self, g:glyf) -> Glyph:
         """
         Returns a 2D list of rendered pixels (Row-major) of the current glyph in g.
         Uses the non-zero winding number rule, which means: for each pixel, go right and on each intersection with any contour segment, determine the gradient at that point. if the gradient points up, add 1, else sub 1. If the result is zero, the point is outside, else, its inside
@@ -223,5 +223,6 @@ def rasterize(contours:List[List[CurvePoint]], antialiasing:int) -> Tuple[List[L
                     x = column + aax * 1 / antialiasing - 1 / antialiasing / 2
                     for intersections in all_intersections:
                         v += 1 if sum([i["winding_number"] for i in intersections if i["x"] >= x]) != 0 else 0
-                bitmap[size.y - row - 1][column] = v / antialiasing**2
+                bitmap[size.y - row - 1][column] = int(v / antialiasing**2 * 255)
+        bitmap.reverse()
         return bitmap, size

@@ -2,8 +2,8 @@ import math, time
 from spiritstream.vec import vec2
 from spiritstream.bindings.glfw import *
 from spiritstream.bindings.opengl import *
-from spiritstream.font import Font
-from typing import Union, List
+from spiritstream.font import Font, Glyph
+from typing import Union, List, Dict
 from dataclasses import dataclass
 from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
@@ -50,8 +50,8 @@ class Cursor:
         if isinstance(pos, vec2): # get idx from pos
             idx = 0
             if not allow_drift: pos.x = self.x
-            if pos.y > self.text.cursorcoords[-1].y + (self.text.atlas.tile.y * LINEHEIGHT) / 2: idx, allow_drift = len(self.text.cursorcoords) - 1, True
-            elif pos.y < self.text.cursorcoords[0].y - (self.text.atlas.tile.y * LINEHEIGHT) / 2: idx, allow_drift = 0, True
+            if pos.y > self.text.cursorcoords[-1].y + (FONTSIZE * LINEHEIGHT) / 2: idx, allow_drift = len(self.text.cursorcoords) - 1, True
+            elif pos.y < self.text.cursorcoords[0].y - (FONTSIZE * LINEHEIGHT) / 2: idx, allow_drift = 0, True
             else:
                 closest_x = closest_y = math.inf
                 for i, l in enumerate(self.text.visible_lines):
@@ -71,20 +71,21 @@ class Cursor:
         
         # scroll into view
         global SCROLLED
-        if self.pos.y - self.text.atlas.tile.y * LINEHEIGHT < self.text.y:
-            self.text.y = self.pos.y - self.text.atlas.tile.y * LINEHEIGHT
+        if self.pos.y - FONTSIZE * LINEHEIGHT < self.text.y:
+            self.text.y = self.pos.y - FONTSIZE * LINEHEIGHT
             SCROLLED = True
-        elif self.pos.y + self.text.atlas.origin.y > self.text.y + HEIGHT:
-            self.text.y = self.pos.y - HEIGHT + self.text.atlas.origin.y
+        elif self.pos.y > self.text.y + HEIGHT:
+            self.text.y = self.pos.y - HEIGHT
             SCROLLED = True
 
-        g = self.text.atlas["|"]
+        g = self.text.glyphs["|"]
+        tx = self.text.glyphAtlas["|"]
         vertices = [
-            # x,y                                            z    texture
-            *(self.pos - vec2(0, g.size.y)).components(),    0.2, *g.texture_coords[0].components(), # top left
-            *(self.pos + g.size * vec2(1, -1)).components(), 0.2, *g.texture_coords[1].components(), # top right
-            *self.pos.components(),                          0.2, *g.texture_coords[2].components(), # bottom left
-            *(self.pos + vec2(g.size.x, 0)).components(),    0.2, *g.texture_coords[3].components(), # bottom right
+            # x,y                                            z    texture        texture y
+            *(self.pos - vec2(0, g.size.y)).components(),    0.2, tx[0],         tx[1] + tx[3], # top left
+            *(self.pos + g.size * vec2(1, -1)).components(), 0.2, tx[0] + tx[2], tx[1] + tx[3], # top right
+            *self.pos.components(),                          0.2, tx[0],         tx[1], # bottom left
+            *(self.pos + vec2(g.size.x, 0)).components(),    0.2, tx[0] + tx[2], tx[1],  # bottom right
         ]
         if allow_drift: self.x = self.pos.x
 
@@ -137,24 +138,24 @@ class Selection:
             if i == 0 and l.start <= self.start:
                 if self.startleft and l.end == self.start: continue
                 vertices.extend([
-                    *(self.text.cursorcoords[self.start] + (self.text.atlas.origin * vec2(-1, 1))).components(),                                   0,
-                    *(self.text.cursorcoords[self.start] + (self.text.atlas.origin * vec2(-1, 1)) - vec2(0, self.text.atlas.tile.y)).components(), 0,
+                    *(self.text.cursorcoords[self.start]).components(),                                   0,
+                    *(self.text.cursorcoords[self.start] - vec2(0, FONTSIZE)).components(), 0,
                 ])
             else:
                 vertices.extend([
-                    *(vec2(0, l.y) + (self.text.atlas.origin * vec2(-1, 1))).components(),                          0,
-                    *(vec2(0, l.y - self.text.atlas.tile.y) + (self.text.atlas.origin * vec2(-1, 1))).components(), 0
+                    *(vec2(0, l.y)).components(),                          0,
+                    *(vec2(0, l.y - FONTSIZE)).components(), 0
                 ])
             if self.end <= l.end:
                 vertices.extend([
-                    *(self.text.cursorcoords[self.end] + (self.text.atlas.origin * vec2(-1, 1))).components(),                                   0,
-                    *(self.text.cursorcoords[self.end] - vec2(0, self.text.atlas.tile.y) + (self.text.atlas.origin * vec2(-1, 1))).components(), 0,
+                    *(self.text.cursorcoords[self.end]).components(),                                   0,
+                    *(self.text.cursorcoords[self.end] - vec2(0, FONTSIZE)).components(), 0,
                 ])
                 break
             else:
                 vertices.extend([
-                    *(self.text.cursorcoords[l.end] + vec2(5, 0) + (self.text.atlas.origin * vec2(-1, 1))).components(),                       0,
-                    *(self.text.cursorcoords[l.end] - vec2(-5, self.text.atlas.tile.y) + (self.text.atlas.origin * vec2(-1, 1))).components(), 0,
+                    *(self.text.cursorcoords[l.end] + vec2(5, 0)).components(),                       0,
+                    *(self.text.cursorcoords[l.end] - vec2(-5, FONTSIZE)).components(), 0,
                 ])
         assert len(vertices) < self.quads*12, "buffer extension not yet supported"
         assert len(vertices) % 12 == 0
@@ -177,9 +178,10 @@ class Line:
     end:int
 
 class Text:
-    def __init__(self, text:str, atlas:TextureAtlas):
+    def __init__(self, text:str, glyphs:Dict[str, Glyph], glyphAtlas:TextureAtlas):
         self.text = text
-        self.atlas = atlas
+        self.glyphs = glyphs
+        self.glyphAtlas = glyphAtlas
         self.linewraps = []
         self.linebreaks = []
         self.lines = [] # all indices where lines end created. useful for determining which portion of the text is currently visible.
@@ -205,13 +207,13 @@ class Text:
         else: self.selection.reset()
 
     @property
-    def visible_lines(self): return (l for l in self.lines if self.y + HEIGHT + self.atlas.tile.y * LINEHEIGHT >= l.y > self.y - self.atlas.tile.y * LINEHEIGHT)
+    def visible_lines(self): return (l for l in self.lines if self.y + HEIGHT + FONTSIZE * LINEHEIGHT >= l.y > self.y - FONTSIZE * LINEHEIGHT)
 
     def update(self):
         self.lines = []
         vertices = []
         indices = []
-        offset = vec2(0, self.atlas.tile.y) # bottom left corner of a character that is guaranteed to fit vertically in the top row 
+        offset = vec2(0, FONTSIZE * LINEHEIGHT) # bottom left corner of character in the first line
         cursorcoords = []
         newline = True
         for i, char in enumerate(self.text):
@@ -219,23 +221,24 @@ class Text:
             if ord(char) == 10:  # newline
                 self.lines.append(Line(newline, offset.y, 0 if len(self.lines) == 0 else self.lines[-1].end + (1 if newline else 0), i))
                 newline = True
-                offset = vec2(0, offset.y+self.atlas.tile.y*LINEHEIGHT)
+                offset = vec2(0, offset.y+FONTSIZE*LINEHEIGHT)
                 continue
-            g = self.atlas[char]
+            g = self.glyphs[char]
             if offset.x + g.advance > self.width:
                 assert i > 0
                 self.lines.append(Line(newline, offset.y, 0 if len(self.lines) == 0 else self.lines[-1].end + (1 if newline else 0), i))
                 newline = False
-                offset = vec2(0, offset.y+self.atlas.tile.y*LINEHEIGHT) # new line, no word splitting
+                offset = vec2(0, offset.y+FONTSIZE*LINEHEIGHT) # new line, no word splitting
             if ord(char) == 32: # space
                 offset.x += g.advance
                 continue
+            tx = self.glyphAtlas[char] # texture coordiantes
             vertices += [
-                # x                                     y                                       z  texture
-                (top_left_x := offset.x + g.bearing.x), (top_left_y := offset.y - g.bearing.y), 0, *g.texture_coords[0].components(), # top left
-                top_left_x + g.size.x,                  top_left_y,                             0, *g.texture_coords[1].components(), # top right
-                top_left_x,                             top_left_y+g.size.y,                    0, *g.texture_coords[2].components(), # bottom left
-                top_left_x + g.size.x,                  top_left_y+g.size.y,                    0, *g.texture_coords[3].components()  # bottom right
+                # x                                     y                                       z  texture        texture y
+                (top_left_x := offset.x + g.bearing.x), (top_left_y := offset.y - g.bearing.y), 0, tx[0],         tx[1] + tx[3], # top left
+                top_left_x + g.size.x,                  top_left_y,                             0, tx[0] + tx[2], tx[1] + tx[3], # top right
+                top_left_x,                             top_left_y+g.size.y,                    0, tx[0],         tx[1], # bottom left
+                top_left_x + g.size.x,                  top_left_y+g.size.y,                    0, tx[0] + tx[2], tx[1],  # bottom right
             ]
             last = len(vertices)//5 - 1 # 5 because xyz and texture xy makes 5 values per vertex
             indices += [
@@ -307,8 +310,8 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         selection = bool(mods & GLFW_MOD_SHIFT)
         if key == GLFW_KEY_LEFT: text.goto(text.selection.start) if text.selection.start != None and not selection else text.goto(text.cursor.idx - 1, left=text.cursor.idx - 1 == text.cursor.line.start and not text.cursor.line.newline, selection=selection)
         if key == GLFW_KEY_RIGHT: text.goto(text.selection.end) if text.selection.end != None and not selection else text.goto(text.cursor.idx+1, selection=selection)
-        if key == GLFW_KEY_UP: text.goto(text.cursor.pos - vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, selection=selection)
-        if key == GLFW_KEY_DOWN: text.goto(text.cursor.pos + vec2(0, text.atlas.tile.y * LINEHEIGHT), allow_drift=False, selection=selection)
+        if key == GLFW_KEY_UP: text.goto(text.cursor.pos - vec2(0, FONTSIZE * LINEHEIGHT), allow_drift=False, selection=selection)
+        if key == GLFW_KEY_DOWN: text.goto(text.cursor.pos + vec2(0, FONTSIZE * LINEHEIGHT), allow_drift=False, selection=selection)
         if key == GLFW_KEY_BACKSPACE: text.erase()
         if key == GLFW_KEY_DELETE: text.erase(right=True)
         if key == GLFW_KEY_ENTER: text.write(ord("\n"))
@@ -347,7 +350,7 @@ def scroll_callback(window, x, y):
     text.y -= y * 40
     SCROLLED = True
 
-FONTSIZE = 48
+FONTSIZE = 12
 LINEHEIGHT = 1.5
 DPI = 96
 WIDTH = 700
@@ -370,8 +373,15 @@ glfwSetMouseButtonCallback(window, mouse_callback)
 glfwSetCursorPosCallback(window, cursor_pos_callback)
 glfwSetScrollCallback(window, scroll_callback)
 
-glyph_atlas = TextureAtlas(set([chr(i) for i in range(32,128)] + list("öäüß")), Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf"), FONTSIZE, DPI)
-with open("text.txt", "r") as f: text = Text(f.read(), glyph_atlas)
+font =  Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf")
+# charset = {"a", "b"}
+charset = set([chr(i) for i in range(32,128)] + list("öäüÖÄÜß"))
+glyphs = {c:font.render(c, FONTSIZE, DPI) for c in charset}
+glyph_atlas = TextureAtlas(GL_RED, {k:v.bitmap for k,v in glyphs.items()}, size=128)
+from ascii_glyphatlas import write_bmp
+write_bmp("glyph atlas.bmp", list(reversed(glyph_atlas.bitmap)))
+
+with open("text.txt", "r") as f: text = Text(f.read(), glyphs, glyph_atlas)
 
 vertex_shader_source = """
 #version 330 core
@@ -435,7 +445,7 @@ frame_count = 0
 last_frame_time = time.time()
 
 glClearColor(0, 0, 0, 1)
-glBindTexture(GL_TEXTURE_2D, text.atlas.texture)
+glBindTexture(GL_TEXTURE_2D, text.glyphAtlas.texture)
 
 while not glfwWindowShouldClose(window):
     if glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS: glfwSetWindowShouldClose(window, GLFW_TRUE)
