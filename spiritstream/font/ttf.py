@@ -2,10 +2,17 @@ from typing import List, Union, Dict, Tuple
 from spiritstream.vec import vec2
 from spiritstream.dtype import *
 from spiritstream.font.table import *
+from spiritstream.font.font import Glyph
+from dataclasses import dataclass
 
 # Architecture notes:
 # - have a ttf file object that manages table data access efficiently and lazily
-def FU_to_px(I:"Interpreter", v:Union[float, int]) -> float: return v * (I.fontsize * I.dpi) / (72 * I.head.unitsPerEM)
+
+@dataclass(frozen=True)
+class CurvePoint:
+    x:float
+    y:float
+    onCurve:bool
 
 # CHECKSUM
 def pad4(b:bytes) -> bytes: return b.ljust((len(b) + 3) // 4 * 4, b'\0')
@@ -21,7 +28,7 @@ def quadratic_equation(a, b, c) -> Union[None, Tuple[float]]:
 # used for compound glyphs
 def transform(v:vec2, xscale, yscale, scale01, scale10) -> vec2: return vec2(xscale * v.x + scale10 * v.y, scale01 * v.x + yscale*v.y)
 
-class Interpreter:
+class TTF:
     def __init__(self, fontfile=None, debug=False):
         self.debug:bool = debug
         if fontfile: self.load(fontfile)
@@ -65,7 +72,9 @@ class Interpreter:
 
         return (from_and_to_bytes, magic_number, head_checksum, reconstrucion, file_checksum)
     
-    def getGlyph(self, unicode:int=None, fontsize=None, dpi=None, glyphIndex=None, antialiasing=0):
+    def fupx(self, v:Union[float, int]) -> float: return v * (self.fontsize * self.dpi) / (72 * self.head.unitsPerEM) # Font Unit to pixel conversion
+    
+    def render(self, unicode:int=None, fontsize=None, dpi=None, glyphIndex=None, antialiasing=0):
         self.antialiasing = antialiasing
         assert (unicode != None and isinstance(unicode, int)) or glyphIndex != None
         assert fontsize != None or self.fontsize != None, "Specify fontsize"
@@ -76,13 +85,13 @@ class Interpreter:
         else: self.fontsize = fontsize
 
         glyphIndex = glyphIndex if glyphIndex != None else self.cmap.subtable.getGlyphIndex(unicode)
-        return self.scan_convert(self.hint(glyphIndex))
+        return self.rasterize(self.loadglyph(glyphIndex))
 
-    def hint(self, glyphIndex, is_child=False) -> glyf:
+    def loadglyph(self, glyphIndex, is_child=False) -> glyf:
         glyph = glyf(self.glyf[self.loca[glyphIndex]:self.loca[glyphIndex+1]]) if glyphIndex + 1 < len(self.loca) else glyf(self.glyf[self.loca[glyphIndex]:])
         if hasattr(glyph, "children"): # compound glyph
             for child in glyph.children: # child is glyphComponent object
-                child_glyph = self.hint(child.glyphIndex, is_child=True)
+                child_glyph = self.loadglyph(child.glyphIndex, is_child=True)
                 if child.USE_MY_METRICS:
                     glyph.advanceWidth = child_glyph.advanceWidth
                     glyph.leftSideBearing = child_glyph.leftSideBearing
@@ -100,9 +109,9 @@ class Interpreter:
                     if child.SCALED_COMPONENT_OFFSET == child.UNSCALED_COMPONENT_OFFSET: child.UNSCALED_COMPONENT_OFFSET = True # default behaviour if flags are invalid
                     if child.UNSCALED_COMPONENT_OFFSET: offset = vec2(child.arg1, child.arg2)
                     else: offset = transform(vec2(child.arg1, child.arg2), xscale, yscale, scale01, scale10)
-                    offset = vec2(FU_to_px(self, child.arg1), FU_to_px(self, child.arg2))
+                    offset = vec2(self.fupx(child.arg1), self.fupx(child.arg2))
                     if child.ROUND_XY_TO_GRID: offset = vec2((offset.x + 0.5)//1, (offset.y + 0.5) // 1) # round to grid
-                else: offset = glyph.get_point(child.arg1) - child_glyph.get_point(child.arg2)
+                else: offset = vec2(glyph.x[child.arg1] - child_glyph[child.arg1], glyph.y[child.arg1] - child_glyph[child.arg2])
                 # apply offset
                 child_glyph.x = [x + offset.x for x in child_glyph.x]
                 child_glyph.y = [y + offset.y for y in child_glyph.y]
@@ -116,91 +125,103 @@ class Interpreter:
                 glyph.x += child_glyph.x.copy()
                 glyph.y += child_glyph.y.copy()
                 glyph.flags += child_glyph.flags
-        else: glyph.x, glyph.y = list(map(lambda v: [FU_to_px(self, v0) for v0 in v], [glyph.x, glyph.y])) # simple glyph: convert Funits to pixels
+        else: glyph.x, glyph.y = list(map(lambda v: [self.fupx(v0) for v0 in v], [glyph.x, glyph.y])) # simple glyph: convert Funits to pixels
         if not (hasattr(glyph, "advanceWidth") and hasattr(glyph, "leftSideBearing")):
             if glyphIndex < self.hhea.numOfLongHorMetrics:
-                glyph.advanceWidth = FU_to_px(self, self.hmtx.longHorMetric[glyphIndex].advanceWidth)
-                glyph.leftSideBearing = FU_to_px(self, self.hmtx.longHorMetric[glyphIndex].leftSideBearing)
+                glyph.advanceWidth = self.fupx(self.hmtx.longHorMetric[glyphIndex].advanceWidth)
+                glyph.leftSideBearing = self.fupx(self.hmtx.longHorMetric[glyphIndex].leftSideBearing)
             else:
-                glyph.advanceWidth = FU_to_px(self, self.hmtx.longHorMetric[-1].advanceWidth)
-                glyph.leftSideBearing = FU_to_px(self, self.hmtx.leftSideBearing[glyphIndex - self.hhea.numOfLongHorMetrics])
+                glyph.advanceWidth = self.fupx(self.hmtx.longHorMetric[-1].advanceWidth)
+                glyph.leftSideBearing = self.fupx(self.hmtx.leftSideBearing[glyphIndex - self.hhea.numOfLongHorMetrics])
         
         if is_child == False and self.head.flags & 2: glyph.x = [x - glyph.leftSideBearing for x in glyph.x] # this flag means left side bearing should be aligned with x = 0. only applies when not dealing with compound glyph components
-        
         return glyph
 
-    def scan_convert(self, g:glyf) -> List[List[int]]:
+    def rasterize(self, g:glyf) -> List[List[int]]:
         """
         Returns a 2D list of rendered pixels (Row-major) of the current glyph in g.
         Uses the non-zero winding number rule, which means: for each pixel, go right and on each intersection with any contour segment, determine the gradient at that point. if the gradient points up, add 1, else sub 1. If the result is zero, the point is outside, else, its inside
+
+        because rasteriztation adds some space to the outside, it should subtract that space from bearing.x (less to move in when rendering because already moved in) and add it to bearing.y (glyph gets taller)
         """
-        pts = [g.get_point(i) for i in range(g.endPtsContours[-1] + 1)] if g.endPtsContours != [] else [glyf.glyphPoint(0, 0, False)] # default 0 to return a bitmap of 0
-        assert isinstance(self.antialiasing, int)
-        xs, ys = [p.x for p in pts], [p.y for p in pts]
-        minX, maxX = math.floor(min(xs)), math.ceil(max(xs))
-        minY, maxY = math.floor(min(ys)), math.ceil(max(ys))
-        g.bearing = vec2(math.floor(g.leftSideBearing) + minX, maxY)
-        width = maxX - minX
-        height = maxY - minY
-        if self.antialiasing > 1:
-            width, height, maxX, minX, maxY, minY = map(lambda x: x*self.antialiasing, [width, height, maxX, minX, maxY, minY])
-            pts = [glyf.glyphPoint(p.x*self.antialiasing, p.y*self.antialiasing, p.onCurve) for p in pts]
-        pts = [glyf.glyphPoint(p.x-minX, p.y-minY, p.onCurve) for p in pts] # shift into positive range
-        bitmap = [[None for x in range(width)] for y in range(height)]
+        assert len(g.x) == len(g.y) and isinstance(self.antialiasing, int) and self.antialiasing >= 1
+        if len(g.x) == 0: return Glyph([], vec2(0,0), vec2(0,0), g.advanceWidth)
+        minX, maxX = math.floor(min(g.x)), math.ceil(max(g.x))
+        minY, maxY = math.floor(min(g.y)), math.ceil(max(g.y))
+        g.bearing = vec2(g.leftSideBearing - (min(g.x) - minX), maxY)
+        pts = [CurvePoint(x-minX, y-minY, bool(f & 0x01)) for x,y,f in zip(g.x, g.y, g.flags)] # shift into positive range
         # add oncurve points between consecutive control points
         all_contours = [] # first point will exist twice. at 0 and -1
         start = 0
         for ep in g.endPtsContours:
-            this_contour = []
+            new_contour = []
             contour = pts[start:ep+1]
             for p1, p2 in zip(contour, contour[1:] + [contour[0]]):
-                this_contour.append(p1)
-                if p1.onCurve == p2.onCurve: this_contour.append(g.glyphPoint(p1.x + (p2.x-p1.x)/2, p1.y + (p2.y-p1.y) / 2, True)) # add another point inbetween. if two consecutive offcurve points, add an oncurve one to keep the curves quadratic. if two oncurve ones, add one so the segments are always 3 points: easy to handle.
+                new_contour.append(p1)
+                # add another point inbetween. if two consecutive offcurve points, add an oncurve one to keep the curves quadratic. if two oncurve ones, add one so the segments are always 3 points: easy to handle.
+                if p1.onCurve == p2.onCurve: new_contour.append(CurvePoint(p1.x + (p2.x-p1.x)/2, p1.y + (p2.y-p1.y) / 2, True)) 
             start = ep+1
-            this_contour.append(contour[0])
-            assert len(this_contour) % 2 == 1
-            all_contours.append(this_contour)
-        for row in range(height):
-            y = row + 0.5
-            intersections = []
-            for contour in all_contours:
-                for i in range(0, len(contour)-2, 2):
-                    p0, p1, p2 = contour[i], contour[i+1], contour[i+2] # p1 = control point
-                    if all(p.y < y for p in (p0, p1, p2)) or all(p.y > y for p in (p0, p1, p2)): continue # segment not near this row
-                    # NOTE: in both linear and bezier curves, if an intersection falls on the exact start of the segment, then that intersection is ignored. It is instead counted as an intersections with the end of the previous segment.
-                    if p1.onCurve: # not an actual control point but one added to keep segments having 3 points each. this line actually goes straight from p0 to p2
-                        if p2.x == p0.x:
-                            if y != p0.y or [isect["x"] for isect in intersections if math.isclose(isect["x"], x) and isect["winding_number"] == (-1 if p2.y-p0.y < 0 else 1)] == []: intersections.append({"x": p2.x, "winding_number": -1 if p2.y - p0.y < 0 else 1})
-                        else: # y = mx + b
-                            m = (p2.y - p0.y) / (p2.x - p0.x) # account for direction of contour too
-                            if m == 0: continue
-                            direction_on_contour = m * (-1 if p2.x - p0.x < 0 else 1)
-                            b = p2.y - (m * p2.x)
-                            x = (y - b) / m
-                            if not math.isclose(x, p0.x, rel_tol=1e-9) and not (math.isclose(y, p0.y, rel_tol=1e-9)) or [isect["x"] for isect in intersections if math.isclose(isect["x"], x) and isect["winding_number"] == (-1 if direction_on_contour < 0 else 1)] == []: intersections.append({"x": x, "winding_number": -1 if direction_on_contour < 0 else 1, "source": "linear"})
-                    else: # actual quadratic bezier curve.
-                        p0, p1, p2 = map(lambda p: vec2(p.x, p.y), (p0, p1, p2)) # convert to vectors
-                        y0, y1, y2 = map(lambda p: p.y-y, (p0, p1, p2)) # shifted down so I can pretend that the x I'm interested in is at y = 0, which is necessary for using quadratic equation
-                        ts = quadratic_equation(y0 - 2*y1 + y2, 2*(y1 - y0), y0)
-                        ts = [t for t in ts if 1 >= t >= 0] if ts != None else []
-                        for t in ts:
-                            p = (((1-t)**2)*p0 + 2*(1-t)*t*p1 + (t**2)*p2)
-                            x = p.x
-                            gradient = 2*(1-t) * (p1-p0) + 2*t*(p2 - p1)
-                            gradient = (-1 if gradient.x < 0 else 1) * (gradient / gradient.x).y if gradient.x != 0 else gradient.y # normalize x, account for zero division. if zero division, just use y to know which direction its going in, roughly. If both gradient.x and .y are 0, its a flat line and won't be counted.
-                            if [isect["x"] for isect in intersections if math.isclose(isect["x"], x) and isect["winding_number"] == (-1 if gradient < 0 else 1)] == []:
-                                if gradient != 0: intersections.append({"x": x, "winding_number": -1 if gradient < 0 else 1, "source": "bezier"})
-            for column in range(width):
-                x = column + 0.5
-                relevant_intersections = [i for i in intersections if i["x"] >= x]
-                bitmap[height - row - 1][column] = 1 if sum([i["winding_number"] for i in relevant_intersections]) != 0 else 0
-        if self.antialiasing > 1:
-            new_bitmap = [[None for x in range(width // self.antialiasing)] for y in range(height // self.antialiasing)]
-            for y in range(0, height, self.antialiasing):
-                for x in range(0, width, self.antialiasing):
-                    values = [bitmap[ny][nx] for ny in range(y, y+self.antialiasing) for nx in range(x,x+self.antialiasing)]
-                    nx, ny = int(x // self.antialiasing), int(y // self.antialiasing)
-                    new_bitmap[ny][nx] = sum(values) / len(values)
-            bitmap = new_bitmap
-        g.bitmap = bitmap
-        return g
+            new_contour.append(contour[0])
+            assert len(new_contour) % 2 == 1
+            all_contours.append(new_contour)
+        bitmap, size = rasterize(all_contours, self.antialiasing)
+        return Glyph(bitmap, size, g.bearing, g.advanceWidth)
+    
+def rasterize(contours:List[List[CurvePoint]], antialiasing:int) -> Tuple[List[List[float]], vec2]:
+        assert isinstance(antialiasing, int) and antialiasing >= 1
+        pts = [p for contour in contours for p in contour]
+        xs, ys = [p.x for p in pts], [p.y for p in pts]
+        minX, maxX = math.floor(min(xs)), math.ceil(max(xs))
+        minY, maxY = math.floor(min(ys)), math.ceil(max(ys))
+        size = vec2(maxX-minX, maxY-minY)
+        bitmap = [[None for x in range(size.x)] for y in range(size.y)]
+
+        for row in range(size.y):
+            all_intersections = []
+            for aay in range(antialiasing):
+                y = row + aay * 1 / antialiasing - 1 / antialiasing / 2
+                intersections = []
+                for contour in contours:
+                    for i in range(0, len(contour)-2, 2):
+                        p0, p1, p2 = contour[i], contour[i+1], contour[i+2] # p1 = control point
+                        if all(p.y < y for p in (p0, p1, p2)) or all(p.y > y for p in (p0, p1, p2)): continue # segment not near this row
+                        if p1.onCurve: # not an actual control point but one added to keep segments having 3 points each. this line actually goes straight from p0 to p2
+                            if p2.x == p0.x:
+                                if y != p0.y or [isect["x"] for isect in intersections if math.isclose(isect["x"], x) and isect["winding_number"] == (-1 if p2.y-p0.y < 0 else 1)] == []: intersections.append({"x": p2.x, "winding_number": -1 if p2.y - p0.y < 0 else 1})
+                            else: # y = mx + b
+                                m = (p2.y - p0.y) / (p2.x - p0.x) # account for direction of contour too
+                                if m == 0: continue
+                                direction_on_contour = m * (-1 if p2.x - p0.x < 0 else 1)
+                                b = p2.y - (m * p2.x)
+                                x = (y - b) / m
+                                if not math.isclose(x, p0.x, rel_tol=1e-9) and not (math.isclose(y, p0.y, rel_tol=1e-9)) or [isect["x"] for isect in intersections if math.isclose(isect["x"], x) and isect["winding_number"] == (-1 if direction_on_contour < 0 else 1)] == []: intersections.append({"x": x, "winding_number": -1 if direction_on_contour < 0 else 1, "source": "linear"})
+                        else: # actual quadratic bezier curve.
+                            p0, p1, p2 = map(lambda p: vec2(p.x, p.y), (p0, p1, p2)) # convert to vectors
+                            y0, y1, y2 = map(lambda p: p.y-y, (p0, p1, p2)) # shifted down so I can pretend that the x I'm interested in is at y = 0, which is necessary for using quadratic equation
+                            ts = quadratic_equation(y0 - 2*y1 + y2, 2*(y1 - y0), y0)
+                            ts = [t for t in ts if 1 >= t >= 0] if ts != None else []
+                            for t in ts:
+                                p = (((1-t)**2)*p0 + 2*(1-t)*t*p1 + (t**2)*p2)
+                                x = p.x
+                                if t in [0, 1]:
+                                    if p1.y > p0.y: winding_number = -1
+                                    elif p1.y < p0.y: winding_number = 1
+                                    else:
+                                        if p2.y > p0.y: winding_number = -1
+                                        elif p2.y < p0.y: winding_number = 1
+                                        else: continue
+                                else:
+                                    gradient = 2*(1-t) * (p1-p0) + 2*t*(p2 - p1)
+                                    gradient = (-1 if gradient.x < 0 else 1) * (gradient / gradient.x).y if gradient.x != 0 else gradient.y # normalize x, account for zero division. if zero division, just use y to know which direction its going in, roughly. If both gradient.x and .y are 0, its a flat line and won't be counted.
+                                    winding_number = -1 if gradient < 0 else 1
+                                intersections.append({"x": x, "winding_number": winding_number})
+                                
+                all_intersections.append(intersections)
+            for column in range(size.x):
+                v = 0
+                for aax in range(antialiasing):
+                    x = column + aax * 1 / antialiasing - 1 / antialiasing / 2
+                    for intersections in all_intersections:
+                        v += 1 if sum([i["winding_number"] for i in intersections if i["x"] >= x]) != 0 else 0
+                bitmap[size.y - row - 1][column] = v / antialiasing**2
+        return bitmap, size

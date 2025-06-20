@@ -212,11 +212,6 @@ class longHorMetric(table):
         self.leftSideBearing = b.parse(int16)
 
 class glyf(table):
-    class glyphPoint(vec2):
-        def __init__(self, x:int, y:int, onCurve:bool):
-            self.onCurve = onCurve
-            self.x, self.y = x, y
-        def __repr__(self): return f"glyphPoint({self.x=}, {self.y=}, {self.onCurve=})"
     def _from_bytes(self, b:Parser):
         if len(b.b) == 0: # support glyph without outlines, like spaces
             self.numberOfContours = 0
@@ -285,10 +280,6 @@ class glyf(table):
                 if any([child.WE_HAVE_INSTRUCTIONS for child in self.children]):
                     self.instructionLength = b.parse(uint16)
                     self.instructions = b.parse(uint8, count=self.instructionLength)
-    
-    def get_point(self, i:int) -> glyphPoint:
-        assert len(self.x) > i >= 0, f"Error: invalid index {i=}"
-        return self.glyphPoint(self.x[i], self.y[i], bool(self.flags[i] & 0x01))
 
 class glyphComponent(table):
     masks = {
