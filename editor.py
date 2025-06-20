@@ -5,54 +5,8 @@ from spiritstream.bindings.opengl import *
 from spiritstream.font import Font
 from typing import Union, List
 from dataclasses import dataclass
-
-class GlyphAtlas:
-    def __init__(self, chars:set, F:Font, size:int, dpi:int):
-        self.glyphs = {c: F.render(c, FONTSIZE, DPI) for c in chars}
-
-        grid_size = math.ceil(math.sqrt(len(chars)))
-        xMin, xMax = min(g.bearing.x for g in self.glyphs.values()), max(g.bearing.x + g.size.x for g in self.glyphs.values())
-        yMin, yMax = min(g.bearing.y - g.size.y for g in self.glyphs.values()), max(g.bearing.y for g in self.glyphs.values())
-
-        self.tile = vec2(xMax - xMin, yMax - yMin) # big enough for every glyph
-
-        texture_size = self.tile * grid_size
-        bmp = [[0 for x in range(texture_size.x)] for row in range(texture_size.y)] # single channel
-        self.origin = vec2(-xMin, -yMin)
-        for i, v in enumerate(self.glyphs.values()):
-            v.texture_coords = [
-                (top_left:=vec2(self.tile.x * (i % grid_size), self.tile.y * (i // grid_size)) + self.origin + v.bearing), # top left
-                top_left + vec2(v.size.x,                 0), # top right
-                top_left + vec2(0,                        -v.size.y), # bottom left
-                top_left + vec2(v.size.x,                 -v.size.y) # bottom right
-            ]
-            for y, row in enumerate(reversed(v.bitmap)): # bitmap starts with top row, but the new array is written assuming the first row is the bottom row. OpenGL expects textures that way.
-                assert 0 <= (y_idx := v.texture_coords[2].y + y) < texture_size.y
-                for x, px in enumerate(row):
-                    assert 0 <= (x_idx := v.texture_coords[2].x + x) < texture_size.x
-                    bmp[y_idx][x_idx] = int(px*255) # red channel only
-            v.texture_coords = [coord / texture_size for coord in v.texture_coords] # scale texture coordinates for use in vertices
-        for v in self.glyphs.values(): del v.bitmap
-
-        # texture
-        self.texture = ctypes.c_uint()
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-        glGenTextures(1, ctypes.byref(self.texture))
-        glActiveTexture(GL_TEXTURE0)
-        glBindTexture(GL_TEXTURE_2D, self.texture)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        flat_bmp = [x for y in bmp for x in y]
-        assert len(flat_bmp) == texture_size.x * texture_size.y
-        bmp_ctypes = (ctypes.c_ubyte * len(flat_bmp))(*flat_bmp)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, texture_size.x, texture_size.y, 0, GL_RED, GL_UNSIGNED_BYTE, bmp_ctypes)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glBindTexture(GL_TEXTURE_2D, 0)
-
-    def __getitem__(self, i): return self.glyphs[i]
+from spiritstream.shader import Shader
+from spiritstream.textureatlas import TextureAtlas
 
 class Cursor:
     def __init__(self, text:"Text"):
@@ -223,7 +177,7 @@ class Line:
     end:int
 
 class Text:
-    def __init__(self, text:str, atlas:GlyphAtlas):
+    def __init__(self, text:str, atlas:TextureAtlas):
         self.text = text
         self.atlas = atlas
         self.linewraps = []
@@ -339,63 +293,6 @@ class Text:
             self.cursor.update(self.selection.start)
             self.selection.reset()
 
-class Shader:
-    def __init__(self, vertex_shader_source:str, fragment_shader_source:str, uniforms:List[str]):
-        vertex_shader = self._compile(GL_VERTEX_SHADER, vertex_shader_source)
-        fragment_shader = self._compile(GL_FRAGMENT_SHADER, fragment_shader_source)
-        self.program = glCreateProgram()
-        glAttachShader(self.program, vertex_shader)
-        glAttachShader(self.program, fragment_shader)
-        glLinkProgram(self.program)
-        success = ctypes.c_int(0)
-        glGetProgramiv(self.program, GL_LINK_STATUS, ctypes.byref(success))
-        if not success.value:
-            error_log = ctypes.create_string_buffer(512)
-            glGetProgramInfoLog(self.program, 512, None, error_log)
-            raise RuntimeError(f"Program link failed: {error_log.value.decode()}")
-        glDeleteShader(vertex_shader)
-        glDeleteShader(fragment_shader)
-        self.uniforms_locations = {u:glGetUniformLocation(self.program, u.encode()) for u in uniforms}
-
-    def use(self): glUseProgram(self.program)
-
-    def setUniform(self, name:str, value:Union[int, tuple], dtype:str):
-        self.use()
-        assert dtype in ["1i", "2f", "3f"]
-        assert name in self.uniforms_locations
-        match dtype:
-            case "1i":
-                assert isinstance(value, int)
-                glUniform1i(self.uniforms_locations[name], value)
-            case "2f":
-                assert isinstance(value, tuple) and len(value) == 2
-                glUniform2f(self.uniforms_locations[name], *value)
-            case "3f":
-                assert isinstance(value, tuple) and len(value) == 3
-                glUniform3f(self.uniforms_locations[name], *value)
-    
-
-    def delete(self): glDeleteProgram(self.program)
-        
-    def _compile(self, shader_type, source_code):
-        shader_id = glCreateShader(shader_type)
-        src_encoded = source_code.encode('utf-8')
-        
-        src_ptr = ctypes.c_char_p(src_encoded)
-        src_array = (ctypes.c_char_p * 1)(src_ptr)
-        length_array = (ctypes.c_int * 1)(len(src_encoded))
-        
-        glShaderSource(shader_id, 1, src_array, length_array)
-        glCompileShader(shader_id)
-        
-        success = ctypes.c_int(0)
-        glGetShaderiv(shader_id, GL_COMPILE_STATUS, ctypes.byref(success))
-        if not success.value:
-            error_log = ctypes.create_string_buffer(512)
-            glGetShaderInfoLog(shader_id, 512, None, error_log)
-            raise RuntimeError(f"Shader compilation failed: {error_log.value.decode()}")
-        return shader_id
-
 @GLFWframebuffersizefun
 def framebuffer_size_callback(window, width, height):
     global WIDTH, HEIGHT, RESIZED
@@ -450,7 +347,7 @@ def scroll_callback(window, x, y):
     text.y -= y * 40
     SCROLLED = True
 
-FONTSIZE = 12
+FONTSIZE = 48
 LINEHEIGHT = 1.5
 DPI = 96
 WIDTH = 700
@@ -473,7 +370,7 @@ glfwSetMouseButtonCallback(window, mouse_callback)
 glfwSetCursorPosCallback(window, cursor_pos_callback)
 glfwSetScrollCallback(window, scroll_callback)
 
-glyph_atlas = GlyphAtlas(set([chr(i) for i in range(32,128)] + list("öäüß")), Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf"), FONTSIZE, DPI)
+glyph_atlas = TextureAtlas(set([chr(i) for i in range(32,128)] + list("öäüß")), Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf"), FONTSIZE, DPI)
 with open("text.txt", "r") as f: text = Text(f.read(), glyph_atlas)
 
 vertex_shader_source = """
