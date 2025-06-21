@@ -74,6 +74,21 @@ class TTF:
     
     def fupx(self, v:Union[float, int]) -> float: return v * (self.fontsize * self.dpi) / (72 * self.head.unitsPerEM) # Font Unit to pixel conversion
     
+    # hilariously inefficient
+    def glyph(self, unicode, fontsize, dpi):
+        self.fontsize = fontsize
+        self.dpi = dpi
+        g = self.loadglyph(self.cmap.subtable.getGlyphIndex(unicode))
+        if g.x:
+            minX, maxX = math.floor(min(g.x)), math.ceil(max(g.x))
+            minY, maxY = math.floor(min(g.y)), math.ceil(max(g.y))
+            size = vec2(maxX - minX, maxY - minY)
+            bearing = vec2(g.leftSideBearing - (min(g.x) - minX), maxY)
+        else:
+            size = vec2(0, 0)
+            bearing = g.leftSideBearing
+        return Glyph(size, bearing, g.advanceWidth)
+
     def render(self, unicode:int=None, fontsize=None, dpi=None, glyphIndex=None, antialiasing=0):
         self.antialiasing = antialiasing
         assert (unicode != None and isinstance(unicode, int)) or glyphIndex != None
@@ -87,6 +102,7 @@ class TTF:
         glyphIndex = glyphIndex if glyphIndex != None else self.cmap.subtable.getGlyphIndex(unicode)
         return self.rasterize(self.loadglyph(glyphIndex))
 
+    # @functools.cache
     def loadglyph(self, glyphIndex, is_child=False) -> glyf:
         glyph = glyf(self.glyf[self.loca[glyphIndex]:self.loca[glyphIndex+1]]) if glyphIndex + 1 < len(self.loca) else glyf(self.glyf[self.loca[glyphIndex]:])
         if hasattr(glyph, "children"): # compound glyph
@@ -165,7 +181,7 @@ class TTF:
             assert len(new_contour) % 2 == 1
             all_contours.append(new_contour)
         bitmap, size = rasterize(all_contours, self.antialiasing)
-        return Glyph(bitmap, size, g.bearing, g.advanceWidth)
+        return bitmap
     
 def rasterize(contours:List[List[CurvePoint]], antialiasing:int) -> Tuple[List[List[float]], vec2]:
         assert isinstance(antialiasing, int) and antialiasing >= 1
