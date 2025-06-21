@@ -46,8 +46,6 @@ class TextureAtlas:
         if textures is not None:
             for k, v in textures.items(): self.add(k, v)
 
-    def __getitem__(self, i): return self.coordinates[i]
-
     def add(self, id:str, bitmap:List[float]):
         """ Uses the Skyline algorithm for 2D packing of textures:
         Finds the lowest leftmost position to fit a rectangle of size (w, h).
@@ -83,7 +81,7 @@ class TextureAtlas:
         j = i + 1
         while j < len(self.skyline) and self.skyline[j][0] < curr_x: del self.skyline[j]
         if j == len(self.skyline) or self.skyline[j][0] > curr_x: self.skyline.insert(j, (curr_x, y))
-        self.coordinates[id] = (x/self.size, y/self.size, w/self.size, h/self.size)
+        ret = self.coordinates[id] = (x/self.size, y/self.size, w/self.size, h/self.size)
         
         # populate self.texture with values
         for row in range(h):
@@ -94,3 +92,5 @@ class TextureAtlas:
         flatex = fully_flatten(self.bitmap)
         glTexImage2D(GL_TEXTURE_2D, 0, self.fmt, self.size, self.size, 0, self.fmt, GL_UNSIGNED_BYTE, (ctypes.c_ubyte * len(flatex))(*flatex))
         glBindTexture(GL_TEXTURE_2D, 0)
+        
+        return ret
