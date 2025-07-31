@@ -161,7 +161,7 @@ class TTF:
         because rasteriztation adds some space to the outside, it should subtract that space from bearing.x (less to move in when rendering because already moved in) and add it to bearing.y (glyph gets taller)
         """
         assert len(g.x) == len(g.y) and isinstance(self.antialiasing, int) and self.antialiasing >= 1
-        if len(g.x) == 0: return Glyph([], vec2(0,0), vec2(0,0), g.advanceWidth)
+        if len(g.x) == 0: return []
         minX, maxX = math.floor(min(g.x)), math.ceil(max(g.x))
         minY, maxY = math.floor(min(g.y)), math.ceil(max(g.y))
         g.bearing = vec2(g.leftSideBearing - (min(g.x) - minX), maxY)

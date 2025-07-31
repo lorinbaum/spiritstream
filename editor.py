@@ -12,7 +12,8 @@ class Cursor:
     def __init__(self, text:"Text"):
         self.text = text # keep reference for cursor_coords and linewraps
         self.left = None
-        self.pos = vec2()
+        self.rpos = vec2() # relative to self.text
+        self._apos = vec2() # absolute. derived from self.text.x, self.text.y and rpos. don't set directly or derive from self.rpos.
         self.idx = None
         self.line = None
         self.x = 0 # Moving up and down using arrow keys can lead to drifting left or right. To avoid, stores original x in this variable.
@@ -67,14 +68,15 @@ class Cursor:
         if idx == self.idx: return
         self.idx = idx
         self.left = left
-        self.pos = vec2(-2, cursorcoords[(self.idx + 1) % len(cursorcoords)].y) if left else cursorcoords[self.idx]
+        self.rpos = vec2(-2, cursorcoords[(self.idx + 1) % len(cursorcoords)].y) if left else cursorcoords[self.idx] # relative
+        self._apos = self.rpos + vec2(self.text.x, self.text.y) # absolute
         
         # scroll into view
-        if self.pos.y - self.text.lineheightUsed < Scene.y:
-            Scene.y = self.pos.y - self.text.lineheightUsed
+        if self._apos.y - self.text.lineheightUsed < Scene.y:
+            Scene.y = self._apos.y - self.text.lineheightUsed
             Scene.scrolled = True
-        elif self.pos.y > Scene.y + Scene.h:
-            Scene.y = self.pos.y - Scene.h
+        elif self._apos.y > Scene.y + Scene.h:
+            Scene.y = self._apos.y - Scene.h
             Scene.scrolled = True
 
         g = Scene.fonts[self.text.font].glyph("|", self.text.fontsize, Scene.dpi)
@@ -82,12 +84,12 @@ class Cursor:
         u, v, w, h = Scene.glyphAtlas.coordinates[k] if k in Scene.glyphAtlas.coordinates else Scene.glyphAtlas.add(k, Scene.fonts[self.text.font].render("|", self.text.fontsize, Scene.dpi))
         vertices = [
             # x,y                                            z    u    v
-            *(self.pos - vec2(0, g.size.y)).components(),    0.2, u,   v+h, # top left
-            *(self.pos + g.size * vec2(1, -1)).components(), 0.2, u+w, v+h, # top right
-            *self.pos.components(),                          0.2, u,   v,   # bottom left
-            *(self.pos + vec2(g.size.x, 0)).components(),    0.2, u+w, v,   # bottom right
+            *(self._apos - vec2(0, g.size.y)).components(),    0.2, u,   v+h, # top left
+            *(self._apos + g.size * vec2(1, -1)).components(), 0.2, u+w, v+h, # top right
+            *self._apos.components(),                          0.2, u,   v,   # bottom left
+            *(self._apos + vec2(g.size.x, 0)).components(),    0.2, u+w, v,   # bottom right
         ]
-        if allow_drift: self.x = self.pos.x
+        if allow_drift: self.x = self.rpos.x
 
         glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
         vertices_ctypes = (ctypes.c_float * len(vertices))(*vertices)
@@ -313,8 +315,8 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         selection = bool(mods & GLFW_MOD_SHIFT)
         if key == GLFW_KEY_LEFT: text.goto(text.selection.start) if text.selection.start != None and not selection else text.goto(text.cursor.idx - 1, left=text.cursor.idx - 1 == text.cursor.line.start and not text.cursor.line.newline, selection=selection)
         if key == GLFW_KEY_RIGHT: text.goto(text.selection.end) if text.selection.end != None and not selection else text.goto(text.cursor.idx+1, selection=selection)
-        if key == GLFW_KEY_UP: text.goto(text.cursor.pos - vec2(0, text.lineheightUsed), allow_drift=False, selection=selection)
-        if key == GLFW_KEY_DOWN: text.goto(text.cursor.pos + vec2(0, text.lineheightUsed), allow_drift=False, selection=selection)
+        if key == GLFW_KEY_UP: text.goto(text.cursor.rpos - vec2(0, text.lineheightUsed), allow_drift=False, selection=selection)
+        if key == GLFW_KEY_DOWN: text.goto(text.cursor.rpos + vec2(0, text.lineheightUsed), allow_drift=False, selection=selection)
         if key == GLFW_KEY_BACKSPACE: text.erase()
         if key == GLFW_KEY_DELETE: text.erase(right=True)
         if key == GLFW_KEY_ENTER: text.write(ord("\n"))
@@ -366,7 +368,7 @@ class _Scene:
         self.fonts = dict()
         self.fontsize = 12
         self.lineheight = 1.5
-        self.glyphAtlas:TextureAtlas # GL_RED because single channel
+        self.glyphAtlas:TextureAtlas
         self.nodes = []
 Scene = _Scene()
 
@@ -377,7 +379,7 @@ glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
 glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, True)
 window = glfwCreateWindow(Scene.w, Scene.h, Scene.title.encode("utf-8"), None, None)
 glfwMakeContextCurrent(window)
-Scene.glyphAtlas = TextureAtlas(GL_RED) # assign after window creation + assignment else texture settings won't apply
+Scene.glyphAtlas = TextureAtlas(GL_RED) # # GL_RED because single channel, assign after window creation + assignment else texture settings won't apply
 
 glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
 glfwSetCharCallback(window, char_callback)
@@ -392,8 +394,8 @@ Scene.font = "Fira Code"
 text_width = 500
 with open("text.txt", "r") as f: text = Text(f.read(), (Scene.w-text_width)/2, 0, text_width, Scene.h)
 
-from ascii_glyphatlas import write_bmp
-write_bmp("glyph atlas.bmp", list(reversed(Scene.glyphAtlas.bitmap)))
+from spiritstream.image import Image
+Image.write(list(reversed(Scene.glyphAtlas.bitmap)), "glyph atlas.bmp")
 
 vertex_shader_source = """
 #version 330 core
@@ -471,7 +473,6 @@ while not glfwWindowShouldClose(window):
         last_frame_time = current_time
         print(f"FPS: {fps}", end="\r")
     if Scene.resized:
-        text.x = (Scene.w - text.w) / 2
         offset_vector = vec2(Scene.x * 2 / Scene.w, Scene.y * 2 / Scene.h) # offset applied to all objects. unit in opengl coordinates
         Scene.resized = False
         glViewport(0, 0, Scene.w, Scene.h)

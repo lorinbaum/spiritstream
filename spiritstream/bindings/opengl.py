@@ -1,9 +1,11 @@
-import ctypes
+import ctypes, os
 
 # opengl reference: https://registry.khronos.org/OpenGL-Refpages/gl4/
 # xml: https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/refs/heads/main/xml/gl.xml
 
-gl = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libGL.so")
+libGLpath = next((f for f in os.listdir("/usr/lib/x86_64-linux-gnu") if f.startswith("libGL.so")), None)
+assert libGLpath is not None, "No libGL.so* in /usr/lib/x86_64-linux-gnu"
+gl = ctypes.CDLL(libGLpath)
 glXGetProcAddress = gl.glXGetProcAddress
 glXGetProcAddress.argtypes = [ctypes.c_char_p]
 glXGetProcAddress.restype = ctypes.c_void_p
