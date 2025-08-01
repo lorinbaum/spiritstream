@@ -428,7 +428,6 @@ last_frame_time = time.time()
 glEnable(GL_DEPTH_TEST)
 glClearDepth(1)
 glClearColor(0, 0, 0, 1)
-glBindTexture(GL_TEXTURE_2D, Scene.glyphAtlas.texture)
 
 while not glfwWindowShouldClose(window):
     if glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS: glfwSetWindowShouldClose(window, GLFW_TRUE)
@@ -470,6 +469,7 @@ while not glfwWindowShouldClose(window):
     glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, 1+text.selection.instance_count) # only cursor for now
     
     # texture quads
+    glBindTexture(GL_TEXTURE_2D, Scene.glyphAtlas.texture)
     if tex_quads_changed: # upload buffer. NOTE: no mechanism shrinks the buffer if fewer quads are needed as before. same applies to quad buffer
         tex_quad_instance_data_ctypes = (ctypes.c_float * len(tex_quad_instance_data))(*tex_quad_instance_data)
         glBindBuffer(GL_ARRAY_BUFFER, tex_quad_instance_vbo)
