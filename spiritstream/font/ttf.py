@@ -18,13 +18,6 @@ class CurvePoint:
 def pad4(b:bytes) -> bytes: return b.ljust((len(b) + 3) // 4 * 4, b'\0')
 def checkSum(b:bytes) -> int: return sum([int.from_bytes(b[i:i+4], "big") for i in range(0, len(b), 4) if (b:=pad4(b))]) & 0xFFFFFFFF
 
-def quadratic_equation(a, b, c) -> Union[None, Tuple[float]]:
-    if a == 0: return None if b == 0 else (-c / b,) # not quadratic, but linear. Function should still return x for 0
-    if (root:=b**2-4*a*c) < 0: return None
-    x1 = (-b + math.sqrt(root)) / (2*a)
-    x2 = (-b - math.sqrt(root)) / (2*a)
-    return (x1,) if x1 == x2 else (x1, x2)
-
 # used for compound glyphs
 def transform(v:vec2, xscale, yscale, scale01, scale10) -> vec2: return vec2(xscale * v.x + scale10 * v.y, scale01 * v.x + yscale*v.y)
 
@@ -182,63 +175,51 @@ class TTF:
             all_contours.append(new_contour)
         bitmap, size = rasterize(all_contours, self.antialiasing)
         return bitmap
-    
-def rasterize(contours:List[List[CurvePoint]], antialiasing:int) -> Tuple[List[List[float]], vec2]:
-        assert isinstance(antialiasing, int) and antialiasing >= 1
-        pts = [p for contour in contours for p in contour]
-        xs, ys = [p.x for p in pts], [p.y for p in pts]
-        minX, maxX = math.floor(min(xs)), math.ceil(max(xs))
-        minY, maxY = math.floor(min(ys)), math.ceil(max(ys))
-        size = vec2(maxX-minX, maxY-minY)
-        bitmap = [[None for x in range(size.x)] for y in range(size.y)]
 
-        for row in range(size.y):
-            all_intersections = []
-            for aay in range(antialiasing):
-                y = row + aay * 1 / antialiasing - 1 / antialiasing / 2
-                intersections = []
-                for contour in contours:
-                    for i in range(0, len(contour)-2, 2):
-                        p0, p1, p2 = contour[i], contour[i+1], contour[i+2] # p1 = control point
-                        if all(p.y < y for p in (p0, p1, p2)) or all(p.y > y for p in (p0, p1, p2)): continue # segment not near this row
-                        if p1.onCurve: # not an actual control point but one added to keep segments having 3 points each. this line actually goes straight from p0 to p2
-                            if p2.x == p0.x:
-                                if y != p0.y or [isect["x"] for isect in intersections if math.isclose(isect["x"], x) and isect["winding_number"] == (-1 if p2.y-p0.y < 0 else 1)] == []: intersections.append({"x": p2.x, "winding_number": -1 if p2.y - p0.y < 0 else 1})
-                            else: # y = mx + b
-                                m = (p2.y - p0.y) / (p2.x - p0.x) # account for direction of contour too
-                                if m == 0: continue
-                                direction_on_contour = m * (-1 if p2.x - p0.x < 0 else 1)
-                                b = p2.y - (m * p2.x)
-                                x = (y - b) / m
-                                if not math.isclose(x, p0.x, rel_tol=1e-9) and not (math.isclose(y, p0.y, rel_tol=1e-9)) or [isect["x"] for isect in intersections if math.isclose(isect["x"], x) and isect["winding_number"] == (-1 if direction_on_contour < 0 else 1)] == []: intersections.append({"x": x, "winding_number": -1 if direction_on_contour < 0 else 1, "source": "linear"})
-                        else: # actual quadratic bezier curve.
-                            p0, p1, p2 = map(lambda p: vec2(p.x, p.y), (p0, p1, p2)) # convert to vectors
-                            y0, y1, y2 = map(lambda p: p.y-y, (p0, p1, p2)) # shifted down so I can pretend that the x I'm interested in is at y = 0, which is necessary for using quadratic equation
-                            ts = quadratic_equation(y0 - 2*y1 + y2, 2*(y1 - y0), y0)
-                            ts = [t for t in ts if 1 >= t >= 0] if ts != None else []
-                            for t in ts:
-                                p = (((1-t)**2)*p0 + 2*(1-t)*t*p1 + (t**2)*p2)
-                                x = p.x
-                                if t in [0, 1]:
-                                    if p1.y > p0.y: winding_number = -1
-                                    elif p1.y < p0.y: winding_number = 1
-                                    else:
-                                        if p2.y > p0.y: winding_number = -1
-                                        elif p2.y < p0.y: winding_number = 1
-                                        else: continue
-                                else:
-                                    gradient = 2*(1-t) * (p1-p0) + 2*t*(p2 - p1)
-                                    gradient = (-1 if gradient.x < 0 else 1) * (gradient / gradient.x).y if gradient.x != 0 else gradient.y # normalize x, account for zero division. if zero division, just use y to know which direction its going in, roughly. If both gradient.x and .y are 0, its a flat line and won't be counted.
-                                    winding_number = -1 if gradient < 0 else 1
-                                intersections.append({"x": x, "winding_number": winding_number})
-                                
-                all_intersections.append(intersections)
-            for column in range(size.x):
-                v = 0
-                for aax in range(antialiasing):
-                    x = column + aax * 1 / antialiasing - 1 / antialiasing / 2
-                    for intersections in all_intersections:
-                        v += 1 if sum([i["winding_number"] for i in intersections if i["x"] >= x]) != 0 else 0
-                bitmap[size.y - row - 1][column] = int(v / antialiasing**2 * 255)
-        bitmap.reverse()
-        return bitmap, size
+@dataclass(frozen=True)
+class Intersection:
+    x:float
+    wn:int # winding number
+
+# Quadratic eq solver with tolerance
+quadratic_equation = lambda a,b,c: [-c / b] if (aok:=abs(a) < 1e-12) and abs(b) > 1e-12 else ([] if aok else (
+    ([] if (d:=b*b-4*a*c)<0 else 
+    [(-b - math.sqrt(d)) / (2 * a), (-b + math.sqrt(d)) / (2 * a)])))
+
+def rasterize(contours: List[List[CurvePoint]], aa: int) -> Tuple[List[List[int]], vec2]:
+    pts = [p for c in contours for p in c]
+    xs, ys = [p.x for p in pts], [p.y for p in pts]
+    mx, MX, my, MY = math.floor(min(xs)), math.ceil(max(xs)), math.floor(min(ys)), math.ceil(max(ys))
+    sx, sy = MX - mx, MY - my
+    bmp = [[0]*sx for _ in range(sy)]
+    
+    for row in range(sy):
+        all_ints = []
+        for aay in range(aa):
+            y = row + (aay + .5)/aa
+            ints = []
+            for c in contours:
+                for i in range(0, len(c)-2, 2):
+                    p0, p1, p2 = [vec2(pt.x, pt.y) for pt in c[i:i+3]]
+                    if all(p.y<y for p in (p0,p1,p2)) or all(p.y>y for p in (p0,p1,p2)): continue
+                    a, b, cc = p0.y - 2*p1.y + p2.y, 2*(p1.y-p0.y), p0.y - y
+                    ts = [t for t in quadratic_equation(a,b,cc) if -1e-9<=t<=1+1e-9]
+                    for t in ts:
+                        t = max(0,min(1,t))
+                        x = (1-t)**2*p0.x + 2*(1-t)*t*p1.x + t**2*p2.x
+                        grad = vec2(2*(1-t)*(p1.x-p0.x)+2*t*(p2.x-p1.x),
+                                    2*(1-t)*(p1.y-p0.y)+2*t*(p2.y-p1.y))
+                        if abs(grad.y)<1e-12: continue
+                        wn = 1 if grad.y>0 else -1
+                        if not any(abs(ii.x-x)<1e-9 and ii.wn==wn for ii in ints): ints.append(Intersection(x,wn))
+            all_ints.append(ints)
+        
+        for col in range(sx):
+            v=0
+            for aax in range(aa):
+                x = col + (aax+.5)/aa
+                for ints in all_ints:
+                    v += 1 if sum(i.wn for i in ints if i.x>=x) != 0 else 0
+            bmp[row][col] = int(v/(aa*aa)*255)
+    return bmp, vec2(sx,sy)
+
