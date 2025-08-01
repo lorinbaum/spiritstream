@@ -32,6 +32,9 @@ GL_ELEMENT_ARRAY_BUFFER = 0x8893
 GL_UNSIGNED_BYTE = 0x1401
 GL_UNSIGNED_INT = 0x1405
 
+GL_DEPTH_TEST = 0x0B71
+GL_DEPTH_BUFFER_BIT = 0x00000100
+
 GL_TEXTURE_2D = 0x0DE1
 GL_TEXTURE_WRAP_S = 0x2802
 GL_TEXTURE_WRAP_T = 0x2803
@@ -79,6 +82,10 @@ glDeleteBuffers = glfunc("glDeleteBuffers", None, [ctypes.c_int, ctypes.POINTER(
 glDeleteProgram = glfunc("glDeleteProgram", None, [ctypes.c_uint])
 glGetError = glfunc("glGetError", ctypes.c_uint, [])
 glDrawElements = glfunc("glDrawElements", None, [ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_uint])
+glVertexAttribDivisor = glfunc("glVertexAttribDivisor", None, [ctypes.c_uint, ctypes.c_uint])
+glDrawElementsInstanced = glfunc("glDrawElementsInstanced", None, [ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_int])
+
+glClearDepth = glfunc("glClearDepth", None, [ctypes.c_double])
 
 glGenTextures = glfunc("glGenTextures", None, [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)])
 glBindTexture = glfunc("glBindTexture", None, [ctypes.c_uint, ctypes.c_uint])

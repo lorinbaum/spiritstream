@@ -17,30 +17,6 @@ class Cursor:
         self.idx = None
         self.line = None
         self.x = 0 # Moving up and down using arrow keys can lead to drifting left or right. To avoid, stores original x in this variable.
-    
-        self.VBO, self.VAO, self.EBO = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
-        glGenBuffers(1, ctypes.byref(self.VBO))
-        glGenVertexArrays(1, ctypes.byref(self.VAO))
-        glGenBuffers(1, ctypes.byref(self.EBO))
-        
-        glBindVertexArray(self.VAO)
-        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.EBO)
-
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5*ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(0))
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5*ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(1)
-
-        glBufferData(GL_ARRAY_BUFFER, 80, None, GL_DYNAMIC_DRAW) # pre allocate buffer
-
-        self.indices = [0, 1, 2, 1, 2, 3]
-        cursor_indices_ctypes = (ctypes.c_uint * len(self.indices)) (*self.indices)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, ctypes.sizeof(cursor_indices_ctypes), cursor_indices_ctypes, GL_STATIC_DRAW)
-        
-        glBindVertexArray(0)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 
         self.update(0)
 
@@ -79,54 +55,24 @@ class Cursor:
             Scene.y = self._apos.y - Scene.h
             Scene.scrolled = True
 
-        g = Scene.fonts[self.text.font].glyph("|", self.text.fontsize, Scene.dpi)
-        k = "|" + str(self.text.fontsize)
-        u, v, w, h = Scene.glyphAtlas.coordinates[k] if k in Scene.glyphAtlas.coordinates else Scene.glyphAtlas.add(k, Scene.fonts[self.text.font].render("|", self.text.fontsize, Scene.dpi))
-        vertices = [
-            # x,y                                            z    u    v
-            *(self._apos - vec2(0, g.size.y)).components(),    0.2, u,   v+h, # top left
-            *(self._apos + g.size * vec2(1, -1)).components(), 0.2, u+w, v+h, # top right
-            *self._apos.components(),                          0.2, u,   v,   # bottom left
-            *(self._apos + vec2(g.size.x, 0)).components(),    0.2, u+w, v,   # bottom right
-        ]
+        h = self.text.lineheightUsed
+        #                           x,y                                    z    w   h  r    g    b    a
+        quad_instance_data[:9] = [*(self._apos + vec2(0, 3)).components(), 0.2, 2, -h, 1.0, 1.0, 1.0, 1.0]
+        global quads_changed
+        quads_changed = True
+
         if allow_drift: self.x = self.rpos.x
-
-        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-        vertices_ctypes = (ctypes.c_float * len(vertices))(*vertices)
-        assert ctypes.sizeof(vertices_ctypes) == 80, "This size is this hard coded in the preallocation"
-        glBufferSubData(GL_ARRAY_BUFFER, 0, 80, vertices_ctypes)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-
 
 class Selection:
     def __init__(self, text:"Text"):
+        self.color = color_from_hex(0x423024)
         self.text = text
         self.start = self.startleft = self.end = self.endleft = self.pos1 = self.pos1left = None
-        self.quads = 100 # preallocates for this many. reallocates if necessary
-        self.length = 0 # number of quads to actually draw
-        
-        self.VBO, self.VAO, self.EBO = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
-        glGenBuffers(1, ctypes.byref(self.VBO))
-        glGenVertexArrays(1, ctypes.byref(self.VAO))
-        glGenBuffers(1, ctypes.byref(self.EBO))
-        
-        glBindVertexArray(self.VAO)
-        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.EBO)
-
-        glBufferData(GL_ARRAY_BUFFER, self.quads * 48, None, GL_DYNAMIC_DRAW) # pre allocate buffer
-        self.indices = [x for i in range(self.quads) for x in [i*4, i*4+1, i*4+2, i*4+1, i*4+2, i*4+3]]
-        indices_ctypes = (ctypes.c_uint * len(self.indices)) (*self.indices)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, ctypes.sizeof(indices_ctypes), indices_ctypes, GL_STATIC_DRAW)
-
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(0))
-        glEnableVertexAttribArray(0)
-
-        glBindVertexArray(0)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+        self.instance_count = 0
     
     def update(self, pos1=None, left1=None, pos2=None, left2=None):
+        self.instance_count = 0
+        done = False # used for existing the for loop below
         if pos1 == left1 == pos2 == left2 == None: # all are set or none are set. this allows calling selection.update() to rerender it
             assert all([i != None for i in [self.pos1, self.pos1left, self.start, self.startleft, self.end, self.endleft]])
             pos1, left1, pos2, left2 = self.start, self.startleft, self.end, self.endleft
@@ -135,41 +81,23 @@ class Selection:
             if self.pos1 == None: self.pos1, self.pos1left = pos1, left1
             self.start, self.startleft, self.end, self.endleft = (self.pos1, left1, pos2, left2) if self.pos1 < pos2 else (pos2, left2, self.pos1, left1)
             if self.start == self.end: return self.reset()
-        vertices = []
         for i, l in enumerate((l for l in self.text.visible_lines if l.end >= self.start)):
             if i == 0 and l.start <= self.start:
                 if self.startleft and l.end == self.start: continue
-                vertices.extend([
-                    *(self.text.cursorcoords[self.start]).components(),                                   0,
-                    *(self.text.cursorcoords[self.start] - vec2(0, self.text.fontsize)).components(), 0,
-                ])
-            else:
-                vertices.extend([
-                    *(vec2(0, l.y)).components(),                          0,
-                    *(vec2(0, l.y - self.text.fontsize)).components(), 0
-                ])
-            if self.end <= l.end:
-                vertices.extend([
-                    *(self.text.cursorcoords[self.end]).components(),                                   0,
-                    *(self.text.cursorcoords[self.end] - vec2(0, self.text.fontsize)).components(), 0,
-                ])
-                break
-            else:
-                vertices.extend([
-                    *(self.text.cursorcoords[l.end] + vec2(5, 0)).components(),                       0,
-                    *(self.text.cursorcoords[l.end] - vec2(-5, self.text.fontsize)).components(), 0,
-                ])
-        assert len(vertices) < self.quads*12, "buffer extension not yet supported"
-        assert len(vertices) % 12 == 0
-        self.length = len(vertices) // 12 # number of quads to render
-
-        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-        vertices_ctypes = (ctypes.c_float * len(vertices))(*vertices)
-        glBufferSubData(GL_ARRAY_BUFFER, 0, ctypes.sizeof(vertices_ctypes), vertices_ctypes)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+                x, y = self.text.cursorcoords[self.start].components()
+            else: x, y = 0, l.y
+            if self.end <= l.end: w, done = self.text.cursorcoords[self.end].x - x, True 
+            else: w = self.text.cursorcoords[l.end].x - x + 5
+            instance_data = [x+self.text.x, y+self.text.y+3, 0.9, w, -self.text.lineheightUsed, self.color.r, self.color.g, self.color.b, self.color.a]
+            # +1 offset because first instance is cursor
+            quad_instance_data[(self.instance_count+1)*(s:=len(instance_data)):(self.instance_count+2)*s] = instance_data
+            self.instance_count += 1
+            if done: break
+        global quads_changed
+        quads_changed = True
 
     def reset(self):
-        self.length = 0
+        self.instance_count = 0
         self.start = self.end = self.pos1 = self.startleft = self.pos1left = self.endleft = None
 
 @dataclass
@@ -180,24 +108,20 @@ class Line:
     end:int
 
 class Text:
-    def __init__(self, text:str, x, y, w, h):
+    def __init__(self, text:str, x, y, w, h, color):
         self.text = text
         self.x = x
         self.y = y
         self.w = w
         self.h = h
+        self.color = color
         self.font = Scene.font
         self.fontsize = Scene.fontsize
         self.lineheight = Scene.lineheight
         self.lineheightUsed = self.fontsize * self.lineheight
-
-        self.lines = [] # useful for determining which portion of the text is currently visible, cursor movement and editing relating to lines
-        self.cursorcoords = []
-
-        self.VBO, self.VAO, self.EBO = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
-        glGenBuffers(1, ctypes.byref(self.VBO))
-        glGenVertexArrays(1, ctypes.byref(self.VAO))
-        glGenBuffers(1, ctypes.byref(self.EBO))
+        self.lines:List[Line] # useful for determining which portion of the text is currently visible, cursor movement and editing relating to lines
+        self.cursorcoords:List[vec2]
+        self.instance_count = 0 # number of quad instances. Used for rendering them.
 
         self.update()
         self.cursor = Cursor(self)
@@ -215,72 +139,50 @@ class Text:
     def visible_lines(self): return (l for l in self.lines if Scene.y + Scene.h + self.lineheightUsed >= l.y > self.y - self.lineheightUsed)
 
     def update(self):
-        self.lines = []
-        vertices = []
-        indices = []
-        offset = vec2(0, self.lineheightUsed) # bottom left corner of character in the first line
+        lines = []
         cursorcoords = []
+        offset = vec2(0, self.lineheightUsed) # bottom left corner of character in the first line
         newline = True
+        instance_count = 0
         for i, char in enumerate(self.text):
-            cursorcoords.append((offset-vec2(2, 0)).copy()) # move cursor 2 pixel to left of char
+            cursorcoords.append(offset.copy())
             if ord(char) == 10:  # newline
-                self.lines.append(Line(newline, offset.y, 0 if len(self.lines) == 0 else self.lines[-1].end + (1 if newline else 0), i))
+                lines.append(Line(newline, offset.y, 0 if len(lines) == 0 else lines[-1].end + (1 if newline else 0), i))
                 newline = True
                 offset = vec2(0, offset.y + self.lineheightUsed)
                 continue
             g = Scene.fonts[self.font].glyph(char, self.fontsize, Scene.dpi)
             if offset.x + g.advance > self.w:
                 assert i > 0
-                self.lines.append(Line(newline, offset.y, 0 if len(self.lines) == 0 else self.lines[-1].end + (1 if newline else 0), i))
+                lines.append(Line(newline, offset.y, 0 if len(lines) == 0 else lines[-1].end + (1 if newline else 0), i))
                 newline = False
                 offset = vec2(0, offset.y + self.lineheightUsed) # new line, no word splitting
             if ord(char) == 32: # space
                 offset.x += g.advance
                 continue
-            k = char + str(self.fontsize)
+            k = Scene.font + char + str(self.fontsize)
             u, v, w, h = Scene.glyphAtlas.coordinates[k] if k in Scene.glyphAtlas.coordinates else Scene.glyphAtlas.add(k, Scene.fonts[self.font].render(char, self.fontsize, Scene.dpi))
-            vertices += [
-                # x                                              y                                                z  u,   v
-                (top_left_x := self.x + offset.x + g.bearing.x), (top_left_y := self.y + offset.y - g.bearing.y), 0, u,   v+h, # top left
-                top_left_x + g.size.x,                           top_left_y,                                      0, u+w, v+h, # top right
-                top_left_x,                                      top_left_y + g.size.y,                           0, u,   v, # bottom left
-                top_left_x + g.size.x,                           top_left_y + g.size.y,                           0, u+w, v,  # bottom right
+
+            instance_data = [
+                self.x + offset.x + g.bearing.x, self.y + offset.y + (g.size.y - g.bearing.y), 0.5, # pos
+                g.size.x, -g.size.y, # size
+                u, v, # uv offset
+                w, h, # uv size
+                self.color.r, self.color.g, self.color.b, self.color.a # color
             ]
-            last = len(vertices)//5 - 1 # 5 because xyz and texture xy makes 5 values per vertex
-            indices += [
-                last-3, last-2, last-1, # triangle top left - top right - bottom left
-                last-2, last-1, last    # triangle top right - bottom left - bottom right
-            ]
+            tex_quad_instance_data[instance_count*(s:=len(instance_data)):(instance_count+1)*s] = instance_data
+            global tex_quads_changed
+            tex_quads_changed = True
+            instance_count += 1
             offset.x += g.advance
-        self.lines.append(Line(newline, offset.y, self.lines[-1].end + (1 if newline else 0) if len(self.lines) > 0 else 0, len(cursorcoords)))
+        lines.append(Line(newline, offset.y, lines[-1].end + (1 if newline else 0) if len(lines) > 0 else 0, len(cursorcoords)))
         cursorcoords.append((offset-vec2(2, 0)).copy()) # first position after the last character
-        self.cursorcoords, self.indices = cursorcoords, indices
-
-        glBindVertexArray(self.VAO)
-        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.EBO)
-
-        vertices_ctypes = (ctypes.c_float * len(vertices))(*vertices)
-        glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(vertices_ctypes), vertices_ctypes, GL_DYNAMIC_DRAW)
-
-        indices_ctypes = (ctypes.c_uint * len(indices)) (*indices)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, ctypes.sizeof(indices_ctypes), indices_ctypes, GL_DYNAMIC_DRAW)
-        
-        # vertices
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5*ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(0))
-        glEnableVertexAttribArray(0)
-        # texture coordinate
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5*ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(1)
-        
-        glBindVertexArray(0)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+        self.lines, self.cursorcoords, self.instance_count = lines, cursorcoords, instance_count
 
     def write(self, t:Union[int, str]):
         if t == None: return # can happen on empty clipboard
         if isinstance(t, int): t = chr(t) # codepoint
-        if self.selection.length == 0:
+        if self.selection.instance_count == 0:
             self.text = self.text[:self.cursor.idx] + t + self.text[self.cursor.idx:]
             self.update()
             self.cursor.update(self.cursor.idx + len(t))
@@ -291,7 +193,8 @@ class Text:
             self.selection.reset()
 
     def erase(self, right=False):
-        if self.selection.length == 0:
+        if self.selection.instance_count == 0:
+            if self.cursor.idx == 0 and right == False: return
             offset = 1 if right else 0
             self.text = self.text[:self.cursor.idx-1 + offset] + self.text[self.cursor.idx + offset:]
             self.update()
@@ -327,9 +230,9 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
             text.selection.reset()
             text.goto(0)
             text.goto(len(text.text), selection=True)
-        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and text.selection.length > 0: glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
+        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and text.selection.instance_count > 0: glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
         if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: text.write(glfwGetClipboardString(window).decode()) # paste
-        if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.length > 0: # cut
+        if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.instance_count > 0: # cut
             glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
             text.erase()
         if key == GLFW_KEY_HOME: text.goto(text.cursor.line.start, allow_drift=True, left=True, selection=selection)
@@ -388,76 +291,142 @@ glfwSetMouseButtonCallback(window, mouse_callback)
 glfwSetCursorPosCallback(window, cursor_pos_callback)
 glfwSetScrollCallback(window, scroll_callback)
 
+# base unit quad used with instancing
+quad_vertices = [
+    0.0, 1.0, 0.0, 0.0, 1.0,  # top-left
+    1.0, 1.0, 0.0, 1.0, 1.0,  # top-right
+    0.0, 0.0, 0.0, 0.0, 0.0,  # bottom-left
+    1.0, 0.0, 0.0, 1.0, 0.0   # bottom-right
+]
+quad_indices = [0, 1, 2, 1, 2, 3]
+quad_VBO, tex_quad_VAO, quad_EBO = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
+glGenBuffers(1, ctypes.byref(quad_VBO))
+glGenVertexArrays(1, ctypes.byref(tex_quad_VAO))
+glGenBuffers(1, ctypes.byref(quad_EBO))
+glBindBuffer(GL_ARRAY_BUFFER, quad_VBO)
+glBindVertexArray(tex_quad_VAO) # must be bound before EBO
+glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, quad_EBO)
+quad_vertices_ctypes = (ctypes.c_float * len(quad_vertices))(*quad_vertices)
+quad_indices_ctypes = (ctypes.c_uint * len(quad_indices)) (*quad_indices)
+glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(quad_vertices_ctypes), quad_vertices_ctypes, GL_STATIC_DRAW) # pre allocate buffer
+glBufferData(GL_ELEMENT_ARRAY_BUFFER, ctypes.sizeof(quad_indices_ctypes), quad_indices_ctypes, GL_STATIC_DRAW) # pre allocate buffer
+
+# VAO for quads with textures
+# position (loc 0)
+glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(0))
+glEnableVertexAttribArray(0)
+# tex (loc 1)
+glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
+glEnableVertexAttribArray(1)
+# quad instances
+tex_quads_changed = False
+tex_quad_instance_data = []
+tex_quad_instance_stride = 13 * ctypes.sizeof(ctypes.c_float)
+tex_quad_instance_vbo = ctypes.c_uint()
+glGenBuffers(1, ctypes.byref(tex_quad_instance_vbo))
+glBindBuffer(GL_ARRAY_BUFFER, tex_quad_instance_vbo)
+# Set instanced attributes (locations 2+; divisor=1 for per-instance)
+# pos (loc 2)
+glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, tex_quad_instance_stride, ctypes.c_void_p(0))
+glEnableVertexAttribArray(2)
+glVertexAttribDivisor(2, 1)
+# size (loc 3)
+glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, tex_quad_instance_stride, ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
+glEnableVertexAttribArray(3)
+glVertexAttribDivisor(3, 1)
+# uv offset (loc 4)
+glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, tex_quad_instance_stride, ctypes.c_void_p(5*ctypes.sizeof(ctypes.c_float)))
+glEnableVertexAttribArray(4)
+glVertexAttribDivisor(4, 1)
+# uv size (loc 5)
+glVertexAttribPointer(5, 2, GL_FLOAT, GL_FALSE, tex_quad_instance_stride, ctypes.c_void_p(7*ctypes.sizeof(ctypes.c_float)))
+glEnableVertexAttribArray(5)
+glVertexAttribDivisor(5, 1)
+# color (loc 6)
+glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, tex_quad_instance_stride, ctypes.c_void_p(9*ctypes.sizeof(ctypes.c_float)))
+glEnableVertexAttribArray(6)
+glVertexAttribDivisor(6, 1)
+
+glBindVertexArray(0)
+glBindBuffer(GL_ARRAY_BUFFER, 0)
+glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+
+# VAO for quads without texture
+quad_VAO = ctypes.c_uint()
+glGenVertexArrays(1, ctypes.byref(quad_VAO))
+glBindVertexArray(quad_VAO)
+glBindBuffer(GL_ARRAY_BUFFER, quad_VBO)
+glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, quad_EBO)
+# position (loc 0)
+glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(0))
+glEnableVertexAttribArray(0)
+# tex (loc 1)
+glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
+glEnableVertexAttribArray(1)
+# instances
+quads_changed = False
+quad_instance_data = [0] * 9 # first data is for cursor, later data for selection
+quad_instance_stride = 9 * ctypes.sizeof(ctypes.c_float)
+quad_instance_vbo = ctypes.c_uint()
+glGenBuffers(1, ctypes.byref(quad_instance_vbo))
+glBindBuffer(GL_ARRAY_BUFFER, quad_instance_vbo)
+# Set instanced attributes (locations 2+; divisor=1 for per-instance)
+# pos (loc 2)
+glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, quad_instance_stride, ctypes.c_void_p(0))
+glEnableVertexAttribArray(2)
+glVertexAttribDivisor(2, 1)
+# size (loc 3)
+glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, quad_instance_stride, ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
+glEnableVertexAttribArray(3)
+glVertexAttribDivisor(3, 1)
+# color (loc 4)
+glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, quad_instance_stride, ctypes.c_void_p(5*ctypes.sizeof(ctypes.c_float)))
+glEnableVertexAttribArray(4)
+glVertexAttribDivisor(4, 1)
+
+glBindVertexArray(0)
+glBindBuffer(GL_ARRAY_BUFFER, 0)
+glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+
 Scene.fonts["Fira Code"] = Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf")
 Scene.font = "Fira Code"
 
+@dataclass(frozen=True)
+class Color:
+    r:float
+    g:float
+    b:float
+    a:float
+
+def color_from_hex(x:int) -> Color:
+    assert x <= 0xffffffff
+    if x <= 0xfff: return Color(((x & 0xf00) >> 8) / 15, ((x & 0xf0) >> 4) / 15, (x & 0xf) / 15, 1.0)
+    elif x <= 0xffff: return Color(((x & 0xf000) >> 12) / 15, ((x & 0xf00) >> 8) / 15, ((x & 0xf0) >> 4) / 15, (x & 0xf) / 15)
+    elif x <= 0xffffff: return Color(((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255, 1.0)
+    else: return Color(((x & 0xff000000) >> 24) / 255, ((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255)
+
 text_width = 500
-with open("text.txt", "r") as f: text = Text(f.read(), (Scene.w-text_width)/2, 0, text_width, Scene.h)
+text_color = Color(1.0, 0.5, 0.2, 1.0)
+with open("text.txt", "r") as f: text = Text(f.read(), (Scene.w-text_width)/2, 0, text_width, Scene.h, text_color)
 
-from spiritstream.image import Image
-Image.write(list(reversed(Scene.glyphAtlas.bitmap)), "glyph atlas.bmp")
+# from spiritstream.image import Image
+# Image.write(list(Scene.glyphAtlas.bitmap), "glyph atlas.bmp")
 
-vertex_shader_source = """
-#version 330 core
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec2 aTexCoord;
+with open(Path(__file__).parent / "spiritstream/shaders/texquad.frag", "r") as f: fragment_shader_source = f.read()
+with open(Path(__file__).parent / "spiritstream/shaders/texquad.vert", "r") as f: vertex_shader_source = f.read()
+texquadShader = Shader(vertex_shader_source, fragment_shader_source, ["glyphAtlas", "scale", "offset"])
+texquadShader.setUniform("glyphAtlas", 0, "1i")  # 0 means GL_TEXTURE0)
 
-uniform vec2 scale;
-uniform vec2 offset;
-
-out vec2 texCoord;
-
-void main()
-{
-    gl_Position = vec4(aPos.x, aPos.y, aPos.z, 1.0) * vec4(scale, 1, 1) + vec4(offset, 0, 0);
-    texCoord = vec2(aTexCoord.x, aTexCoord.y);
-}"""
-
-fragment_shader_source = """
-#version 330 core
-in vec2 texCoord;
-out vec4 FragColor;
-
-uniform sampler2D glyphTexture;
-uniform vec3 textColor;
-
-void main()
-{
-    FragColor = vec4(textColor, texture(glyphTexture, texCoord).r);
-}"""
-
-textShader = Shader(vertex_shader_source, fragment_shader_source, ["glyphTexture", "textColor", "scale", "offset"])
-textShader.setUniform("glyphTexture", 0, "1i")  # 0 means GL_TEXTURE0)
-
-vertex_shader_source = """
-#version 330 core
-layout (location = 0) in vec3 aPos;
-
-uniform vec2 scale;
-uniform vec2 offset;
-
-void main()
-{
-    gl_Position = vec4(aPos.x, aPos.y, aPos.z, 1.0) * vec4(scale, 1, 1) + vec4(offset, 0, 0);
-}"""
-
-fragment_shader_source = """
-#version 330 core
-out vec4 FragColor;
-
-uniform vec3 selectionColor;
-
-void main()
-{
-    FragColor = vec4(selectionColor, 1.0);
-}"""
-selectionShader = Shader(vertex_shader_source, fragment_shader_source, ["selectionColor", "offset", "scale"])
-selectionShader.setUniform("selectionColor", (0x42 / 0xff, 0x30 / 0xff, 0x24 / 0xff), "3f")
+with open(Path(__file__).parent / "spiritstream/shaders/quad.frag", "r") as f: fragment_shader_source = f.read()
+with open(Path(__file__).parent / "spiritstream/shaders/quad.vert", "r") as f: vertex_shader_source = f.read()
+quadShader = Shader(vertex_shader_source, fragment_shader_source, ["scale", "offset"])
 
 fps = None
 frame_count = 0
 last_frame_time = time.time()
 
+glEnable(GL_DEPTH_TEST)
+glClearDepth(1)
 glClearColor(0, 0, 0, 1)
 glBindTexture(GL_TEXTURE_2D, Scene.glyphAtlas.texture)
 
@@ -478,39 +447,51 @@ while not glfwWindowShouldClose(window):
         glViewport(0, 0, Scene.w, Scene.h)
     if Scene.scrolled:
         offset_vector = vec2(Scene.x * 2 / Scene.w, Scene.y * 2 / Scene.h) # offset applied to all objects. unit in opengl coordinates
-        if text.selection.length > 0: text.selection.update()
+        if text.selection.instance_count > 0: text.selection.update()
         Scene.scrolled = False
     
-    glClear(GL_COLOR_BUFFER_BIT)
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+    scale, offset = (2 / Scene.w, -2 / Scene.h), tuple((vec2(-1, 1) + offset_vector).components())
+
+    # NOTE: quads are rendered before textured quads because glyphs (textured quads) have transparency.
+
+    # quads
+    if quads_changed: # upload buffer
+        quad_instance_data_ctypes = (ctypes.c_float * len(quad_instance_data))(*quad_instance_data)
+        glBindBuffer(GL_ARRAY_BUFFER, quad_instance_vbo)
+        glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(quad_instance_data_ctypes), quad_instance_data_ctypes, GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        quads_changed = False
+    quadShader.use()
+    quadShader.setUniform("scale", scale, "2f") # inverted y axis. from my view (0,0) is the top left corner, like in browsers
+    quadShader.setUniform("offset", offset, "2f")
+    glBindVertexArray(quad_VAO)
+    glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, 1+text.selection.instance_count) # only cursor for now
     
-    selectionShader.use()
-    selectionShader.setUniform("scale", (2 / Scene.w, -2 / Scene.h), "2f") # inverted y axis. from my view (0,0) is the top left corner, like in browsers
-    selectionShader.setUniform("offset", tuple((vec2(-1, 1) + offset_vector).components()), "2f")
-    glBindVertexArray(text.selection.VAO)
-    glDrawElements(GL_TRIANGLES, text.selection.length * 6, GL_UNSIGNED_INT, 0)
-
-    textShader.use()
-    textShader.setUniform("scale", (2 / Scene.w, -2 / Scene.h), "2f") # inverted y axis. from my view (0,0) is the top left corner, like in browsers
-    textShader.setUniform("offset", tuple((vec2(-1, 1) + offset_vector).components()), "2f")
-    textShader.setUniform("textColor", (1.0, 0.5, 0.2), "3f")
-    glBindVertexArray(text.VAO)
-    glDrawElements(GL_TRIANGLES, len(text.indices), GL_UNSIGNED_INT, 0)
-
-    textShader.setUniform("textColor", (1.0, 1.0, 1.0), "3f")
-    glBindVertexArray(text.cursor.VAO)
-    glDrawElements(GL_TRIANGLES, len(text.cursor.indices), GL_UNSIGNED_INT, 0)
-
+    # texture quads
+    if tex_quads_changed: # upload buffer. NOTE: no mechanism shrinks the buffer if fewer quads are needed as before. same applies to quad buffer
+        tex_quad_instance_data_ctypes = (ctypes.c_float * len(tex_quad_instance_data))(*tex_quad_instance_data)
+        glBindBuffer(GL_ARRAY_BUFFER, tex_quad_instance_vbo)
+        glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(tex_quad_instance_data_ctypes), tex_quad_instance_data_ctypes, GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        tex_quads_changed = False
+    texquadShader.use()
+    texquadShader.setUniform("scale", scale, "2f") # inverted y axis. from my view (0,0) is the top left corner, like in browsers
+    texquadShader.setUniform("offset", offset, "2f")
+    glBindVertexArray(tex_quad_VAO)
+    glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, text.instance_count)
 
     if (error:=glGetError()) != GL_NO_ERROR: print(f"OpenGL Error: {hex(error)}")
 
     glfwSwapBuffers(window)
     glfwWaitEvents()
 
-glDeleteVertexArrays(1, text.VAO)
-glDeleteBuffers(1, text.VBO)
-glDeleteBuffers(1, text.EBO)
-glDeleteVertexArrays(1, text.cursor.VAO)
-glDeleteBuffers(1, text.cursor.VBO)
-glDeleteBuffers(1, text.cursor.EBO)
-textShader.delete()
+glDeleteBuffers(1, quad_VBO)
+glDeleteBuffers(1, quad_EBO)
+glDeleteVertexArrays(1, tex_quad_VAO)
+glDeleteVertexArrays(1, quad_VAO)
+glDeleteBuffers(1, tex_quad_instance_vbo)
+glDeleteBuffers(1, quad_instance_vbo)
+texquadShader.delete()
 glfwTerminate()
