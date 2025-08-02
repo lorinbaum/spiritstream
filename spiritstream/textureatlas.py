@@ -27,7 +27,12 @@ class TextureAtlas:
         self.bitmap = [[0 for row in range(size)] for column in range(size)]
         # self.bitmap = [[[0 for c in range(self.channels)] for row in range(size)] for column in range(size)]
         self.skyline:List[Tuple] = [(0, 0)]
+        self._texture_setup()
+        if textures is not None:
+            for k, v in textures.items(): self.add(k, v)
 
+    def _texture_setup(self):
+        """Exists separately to initalize the OpenGL texture after loading a TextureAtlas from .pkl"""
         self.texture = ctypes.c_uint()
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glGenTextures(1, ctypes.byref(self.texture))
@@ -38,13 +43,10 @@ class TextureAtlas:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         flatex = fully_flatten(self.bitmap)
-        glTexImage2D(GL_TEXTURE_2D, 0, fmt, size, size, 0, fmt, GL_UNSIGNED_BYTE, (ctypes.c_ubyte * len(flatex))(*flatex))
+        glTexImage2D(GL_TEXTURE_2D, 0, self.fmt, self.size, self.size, 0, self.fmt, GL_UNSIGNED_BYTE, (ctypes.c_ubyte * len(flatex))(*flatex))
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glBindTexture(GL_TEXTURE_2D, 0)
-        
-        if textures is not None:
-            for k, v in textures.items(): self.add(k, v)
 
     def add(self, id:str, bitmap:List[float]):
         """ Uses the Skyline algorithm for 2D packing of textures:

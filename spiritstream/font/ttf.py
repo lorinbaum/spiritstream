@@ -4,6 +4,7 @@ from spiritstream.dtype import *
 from spiritstream.font.table import *
 from spiritstream.font.font import Glyph
 from dataclasses import dataclass
+import functools
 
 # Architecture notes:
 # - have a ttf file object that manages table data access efficiently and lazily
@@ -68,6 +69,7 @@ class TTF:
     def fupx(self, v:Union[float, int]) -> float: return v * (self.fontsize * self.dpi) / (72 * self.head.unitsPerEM) # Font Unit to pixel conversion
     
     # hilariously inefficient
+    @functools.cache
     def glyph(self, unicode, fontsize, dpi):
         self.fontsize = fontsize
         self.dpi = dpi
@@ -95,7 +97,6 @@ class TTF:
         glyphIndex = glyphIndex if glyphIndex != None else self.cmap.subtable.getGlyphIndex(unicode)
         return self.rasterize(self.loadglyph(glyphIndex))
 
-    # @functools.cache
     def loadglyph(self, glyphIndex, is_child=False) -> glyf:
         glyph = glyf(self.glyf[self.loca[glyphIndex]:self.loca[glyphIndex+1]]) if glyphIndex + 1 < len(self.loca) else glyf(self.glyf[self.loca[glyphIndex]:])
         if hasattr(glyph, "children"): # compound glyph

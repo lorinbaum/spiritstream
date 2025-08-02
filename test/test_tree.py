@@ -1,7 +1,7 @@
 from pathlib import Path
 import unittest
 from spiritstream.tree import treeify, tokenize, walk, serialize, tokenizeCSS, show, parse, Status
-from spiritstream.config import SPACES
+from spiritstream.helpers import SPACES
 
 TEST_CASES = [
     {

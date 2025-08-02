@@ -1,7 +1,7 @@
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Optional, Union, Generator, Any, Iterable, Dict
-from spiritstream.config import SPACES
+from spiritstream.helpers import SPACES
 import re
 
 PATTERN = re.compile("|".join([

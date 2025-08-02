@@ -1,4 +1,4 @@
-import math, time
+import math, time, pickle
 from spiritstream.vec import vec2
 from spiritstream.bindings.glfw import *
 from spiritstream.bindings.opengl import *
@@ -7,6 +7,16 @@ from typing import Union, List, Dict
 from dataclasses import dataclass
 from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
+from spiritstream.helpers import PRINT_TIMINGS, CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
+
+"""
+make fast
+timing to see what is slow
+CACHEATLAS to save and reload it to make faster for development
+
+merge markdown / html tree
+"""
+if PRINT_TIMINGS: FIRSTTIME = LASTTIME = time.time()
 
 class Cursor:
     def __init__(self, text:"Text"):
@@ -139,6 +149,12 @@ class Text:
     def visible_lines(self): return (l for l in self.lines if Scene.y + Scene.h + self.lineheightUsed >= l.y > self.y - self.lineheightUsed)
 
     def update(self):
+        if PRINT_TIMINGS:
+            LASTTIME = time.time()
+            GLYPHLOADTIME = 0
+            GLYPHRENDERTIME = 0
+            INSTANCEUPDATETIME = 0
+            TIMING_NEWGLYPHCOUNT = 0
         lines = []
         cursorcoords = []
         offset = vec2(0, self.lineheightUsed) # bottom left corner of character in the first line
@@ -151,7 +167,9 @@ class Text:
                 newline = True
                 offset = vec2(0, offset.y + self.lineheightUsed)
                 continue
+            if PRINT_TIMINGS: PREGLYPHLOADTIME = time.time()
             g = Scene.fonts[self.font].glyph(char, self.fontsize, Scene.dpi)
+            if PRINT_TIMINGS: GLYPHLOADTIME += time.time() - PREGLYPHLOADTIME
             if offset.x + g.advance > self.w:
                 assert i > 0
                 lines.append(Line(newline, offset.y, 0 if len(lines) == 0 else lines[-1].end + (1 if newline else 0), i))
@@ -161,8 +179,14 @@ class Text:
                 offset.x += g.advance
                 continue
             k = Scene.font + char + str(self.fontsize)
+            if PRINT_TIMINGS: PREGLYPHRENDERTIME, TIMING_NEWGLYPH = time.time(), k not in Scene.glyphAtlas.coordinates
             u, v, w, h = Scene.glyphAtlas.coordinates[k] if k in Scene.glyphAtlas.coordinates else Scene.glyphAtlas.add(k, Scene.fonts[self.font].render(char, self.fontsize, Scene.dpi))
-
+            if PRINT_TIMINGS:
+                if TIMING_NEWGLYPH:
+                    GLYPHRENDERTIME += time.time() - PREGLYPHRENDERTIME
+                    TIMING_NEWGLYPHCOUNT += 1
+                PREINSTANCEUPDATETIME = time.time()
+                
             instance_data = [
                 self.x + offset.x + g.bearing.x, self.y + offset.y + (g.size.y - g.bearing.y), 0.5, # pos
                 g.size.x, -g.size.y, # size
@@ -175,9 +199,17 @@ class Text:
             tex_quads_changed = True
             instance_count += 1
             offset.x += g.advance
+            if PRINT_TIMINGS: INSTANCEUPDATETIME += time.time() - PREINSTANCEUPDATETIME
+
         lines.append(Line(newline, offset.y, lines[-1].end + (1 if newline else 0) if len(lines) > 0 else 0, len(cursorcoords)))
         cursorcoords.append((offset-vec2(2, 0)).copy()) # first position after the last character
         self.lines, self.cursorcoords, self.instance_count = lines, cursorcoords, instance_count
+        if PRINT_TIMINGS:
+            print(f"{time.time() - LASTTIME:.3f}: Total text update:")
+            print(f"  {GLYPHLOADTIME:.3f}: Total glyph loading")
+            if TIMING_NEWGLYPHCOUNT: print(f"  {GLYPHRENDERTIME:.3f}: Total new glyph rendering ({TIMING_NEWGLYPHCOUNT} glyphs, {GLYPHRENDERTIME / TIMING_NEWGLYPHCOUNT:.3f} average per glyph)")
+            print(f"  {INSTANCEUPDATETIME:.3f}: Total instance data update")
+            print("        ")
 
     def write(self, t:Union[int, str]):
         if t == None: return # can happen on empty clipboard
@@ -275,6 +307,7 @@ class _Scene:
         self.nodes = []
 Scene = _Scene()
 
+
 glfwInit()
 glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
 glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
@@ -282,7 +315,16 @@ glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
 glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, True)
 window = glfwCreateWindow(Scene.w, Scene.h, Scene.title.encode("utf-8"), None, None)
 glfwMakeContextCurrent(window)
-Scene.glyphAtlas = TextureAtlas(GL_RED) # # GL_RED because single channel, assign after window creation + assignment else texture settings won't apply
+
+if CACHE_GLYPHATLAS:
+    atlaspath = Path(__file__).parent / "cache/TextureAtlas.pkl"
+    atlaspath.parent.mkdir(parents=True, exist_ok=True)
+    if atlaspath.exists():
+        with open(atlaspath, "rb") as f: Scene.glyphAtlas = pickle.load(f)
+        Scene.glyphAtlas._texture_setup()
+    else: print(f"No cached glyphatlas found at {atlaspath}.")
+# GL_RED because single channel, assign after window creation + assignment else texture settings won't apply
+if not hasattr(Scene, "glyphAtlas"): Scene.glyphAtlas = TextureAtlas(GL_RED)
 
 glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
 glfwSetCharCallback(window, char_callback)
@@ -407,10 +449,14 @@ def color_from_hex(x:int) -> Color:
 
 text_width = 500
 text_color = Color(1.0, 0.5, 0.2, 1.0)
-with open("text.txt", "r") as f: text = Text(f.read(), (Scene.w-text_width)/2, 0, text_width, Scene.h, text_color)
 
-# from spiritstream.image import Image
-# Image.write(list(Scene.glyphAtlas.bitmap), "glyph atlas.bmp")
+fps = None
+frame_count = 0
+last_frame_time = time.time()
+
+if PRINT_TIMINGS:
+    print(f"{time.time() - LASTTIME:.3f}: Initialization")
+    LASTTIME = time.time()
 
 with open(Path(__file__).parent / "spiritstream/shaders/texquad.frag", "r") as f: fragment_shader_source = f.read()
 with open(Path(__file__).parent / "spiritstream/shaders/texquad.vert", "r") as f: vertex_shader_source = f.read()
@@ -421,13 +467,16 @@ with open(Path(__file__).parent / "spiritstream/shaders/quad.frag", "r") as f: f
 with open(Path(__file__).parent / "spiritstream/shaders/quad.vert", "r") as f: vertex_shader_source = f.read()
 quadShader = Shader(vertex_shader_source, fragment_shader_source, ["scale", "offset"])
 
-fps = None
-frame_count = 0
-last_frame_time = time.time()
+if PRINT_TIMINGS:
+    print(f"{time.time() - LASTTIME:.3f}: Loading shaders")
+    LASTTIME = time.time()
 
 glEnable(GL_DEPTH_TEST)
 glClearDepth(1)
 glClearColor(0, 0, 0, 1)
+
+with open("text.txt", "r") as f: text = Text(f.read(), (Scene.w-text_width)/2, 0, text_width, Scene.h, text_color)
+if PRINT_TIMINGS: LASTTIME = time.time()
 
 while not glfwWindowShouldClose(window):
     if glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS: glfwSetWindowShouldClose(window, GLFW_TRUE)
@@ -481,11 +530,22 @@ while not glfwWindowShouldClose(window):
     texquadShader.setUniform("offset", offset, "2f")
     glBindVertexArray(tex_quad_VAO)
     glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, text.instance_count)
-
+    
     if (error:=glGetError()) != GL_NO_ERROR: print(f"OpenGL Error: {hex(error)}")
 
     glfwSwapBuffers(window)
+    if PRINT_TIMINGS and LASTTIME is not None:
+        print(f"{time.time() - LASTTIME:.3f}: First frame done")
+        print(f"{time.time() - FIRSTTIME:.3f}: Total\n------")
+        LASTTIME = None
     glfwWaitEvents()
+
+if SAVE_GLYPHATLAS:
+    from spiritstream.image import Image
+    Image.write(list(reversed(Scene.glyphAtlas.bitmap)), Path(__file__).parent / "GlyphAtlas.bmp")
+
+if CACHE_GLYPHATLAS:
+    with open(atlaspath, "wb") as f: pickle.dump(Scene.glyphAtlas, f)
 
 glDeleteBuffers(1, quad_VBO)
 glDeleteBuffers(1, quad_EBO)
