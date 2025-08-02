@@ -1,10 +1,12 @@
 from spiritstream.bindings.opengl import *
 from typing import Union, List
+from pathlib import Path
 
 class Shader:
-    def __init__(self, vertex_shader_source:str, fragment_shader_source:str, uniforms:List[str]):
-        vertex_shader = self._compile(GL_VERTEX_SHADER, vertex_shader_source)
-        fragment_shader = self._compile(GL_FRAGMENT_SHADER, fragment_shader_source)
+    def __init__(self, vert:Union[Path, str], frag:Union[Path, str], uniforms:List[str]):
+        with open(vert, "r") as f: vertex_shader = self._compile(GL_VERTEX_SHADER, f.read())
+        with open(frag, "r") as f: fragment_shader = self._compile(GL_FRAGMENT_SHADER, f.read())
+        
         self.program = glCreateProgram()
         glAttachShader(self.program, vertex_shader)
         glAttachShader(self.program, fragment_shader)

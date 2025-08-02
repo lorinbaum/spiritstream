@@ -9,13 +9,6 @@ from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
 from spiritstream.helpers import PRINT_TIMINGS, CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
 
-"""
-make fast
-timing to see what is slow
-CACHEATLAS to save and reload it to make faster for development
-
-merge markdown / html tree
-"""
 if PRINT_TIMINGS: FIRSTTIME = LASTTIME = time.time()
 
 class Cursor:
@@ -208,8 +201,7 @@ class Text:
             print(f"{time.time() - LASTTIME:.3f}: Total text update:")
             print(f"  {GLYPHLOADTIME:.3f}: Total glyph loading")
             if TIMING_NEWGLYPHCOUNT: print(f"  {GLYPHRENDERTIME:.3f}: Total new glyph rendering ({TIMING_NEWGLYPHCOUNT} glyphs, {GLYPHRENDERTIME / TIMING_NEWGLYPHCOUNT:.3f} average per glyph)")
-            print(f"  {INSTANCEUPDATETIME:.3f}: Total instance data update")
-            print("        ")
+            print(f"  {INSTANCEUPDATETIME:.3f}: Total instance data update\n      ")
 
     def write(self, t:Union[int, str]):
         if t == None: return # can happen on empty clipboard
@@ -236,6 +228,20 @@ class Text:
             self.update()
             self.cursor.update(self.selection.start)
             self.selection.reset()
+
+@dataclass(frozen=True)
+class Color:
+    r:float
+    g:float
+    b:float
+    a:float
+
+def color_from_hex(x:int) -> Color:
+    assert x <= 0xffffffff
+    if x <= 0xfff: return Color(((x & 0xf00) >> 8) / 15, ((x & 0xf0) >> 4) / 15, (x & 0xf) / 15, 1.0)
+    elif x <= 0xffff: return Color(((x & 0xf000) >> 12) / 15, ((x & 0xf00) >> 8) / 15, ((x & 0xf0) >> 4) / 15, (x & 0xf) / 15)
+    elif x <= 0xffffff: return Color(((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255, 1.0)
+    else: return Color(((x & 0xff000000) >> 24) / 255, ((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255)
 
 @GLFWframebuffersizefun
 def framebuffer_size_callback(window, width, height):
@@ -306,7 +312,6 @@ class _Scene:
         self.glyphAtlas:TextureAtlas
         self.nodes = []
 Scene = _Scene()
-
 
 glfwInit()
 glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
@@ -433,20 +438,6 @@ glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
 Scene.fonts["Fira Code"] = Font("assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf")
 Scene.font = "Fira Code"
 
-@dataclass(frozen=True)
-class Color:
-    r:float
-    g:float
-    b:float
-    a:float
-
-def color_from_hex(x:int) -> Color:
-    assert x <= 0xffffffff
-    if x <= 0xfff: return Color(((x & 0xf00) >> 8) / 15, ((x & 0xf0) >> 4) / 15, (x & 0xf) / 15, 1.0)
-    elif x <= 0xffff: return Color(((x & 0xf000) >> 12) / 15, ((x & 0xf00) >> 8) / 15, ((x & 0xf0) >> 4) / 15, (x & 0xf) / 15)
-    elif x <= 0xffffff: return Color(((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255, 1.0)
-    else: return Color(((x & 0xff000000) >> 24) / 255, ((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255)
-
 text_width = 500
 text_color = Color(1.0, 0.5, 0.2, 1.0)
 
@@ -454,22 +445,13 @@ fps = None
 frame_count = 0
 last_frame_time = time.time()
 
-if PRINT_TIMINGS:
-    print(f"{time.time() - LASTTIME:.3f}: Initialization")
-    LASTTIME = time.time()
+if PRINT_TIMINGS: print(f"{-LASTTIME + (LASTTIME:=time.time()):.3f}: Initialization")
 
-with open(Path(__file__).parent / "spiritstream/shaders/texquad.frag", "r") as f: fragment_shader_source = f.read()
-with open(Path(__file__).parent / "spiritstream/shaders/texquad.vert", "r") as f: vertex_shader_source = f.read()
-texquadShader = Shader(vertex_shader_source, fragment_shader_source, ["glyphAtlas", "scale", "offset"])
+texquadShader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/texquad.vert", p.parent / "texquad.frag", ["glyphAtlas", "scale", "offset"])
 texquadShader.setUniform("glyphAtlas", 0, "1i")  # 0 means GL_TEXTURE0)
+quadShader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/quad.vert", p.parent / "quad.frag", ["scale", "offset"])
 
-with open(Path(__file__).parent / "spiritstream/shaders/quad.frag", "r") as f: fragment_shader_source = f.read()
-with open(Path(__file__).parent / "spiritstream/shaders/quad.vert", "r") as f: vertex_shader_source = f.read()
-quadShader = Shader(vertex_shader_source, fragment_shader_source, ["scale", "offset"])
-
-if PRINT_TIMINGS:
-    print(f"{time.time() - LASTTIME:.3f}: Loading shaders")
-    LASTTIME = time.time()
+if PRINT_TIMINGS: print(f"{-LASTTIME + (LASTTIME:=time.time()):.3f}: Loading shaders")
 
 glEnable(GL_DEPTH_TEST)
 glClearDepth(1)
