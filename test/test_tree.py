@@ -67,7 +67,7 @@ TEST_CASES = [
     },
     {
         "name": "blockquote",
-        "md": "> hamedi1\n    > hamedi2\n> hamedi3\n>> hamedi4\n>> hamedi5\n >hamid\n \>hamud\n",
+        "md": "> hamedi1\n    > hamedi2\n> hamedi3\n>> hamedi4\n>> hamedi5\n >hamid\n \\>hamud\n",
         "tokens": [{"name": "blockquote_line", "data": 1},
             {"name": "indented_line"},
             {"name": "blockquote_line", "data":1},
@@ -342,7 +342,7 @@ TEST_CASES = [
     },
     {
         "name": "wikilinks",
-        "md": "[[hamedi0]]\n![[hamedi1]]\n\![[hamedi2]]\n\[hamedi3]\n\[[hamedi4]]\n[[hamedi5]][[hamedi6]]\n[![ha]]\n[[hamedi7][hamedi8]]\n[[hamedi9]](breaking?)\n\]]\n]\]",
+        "md": "[[hamedi0]]\n![[hamedi1]]\n\\![[hamedi2]]\n\\[hamedi3]\n\\[[hamedi4]]\n[[hamedi5]][[hamedi6]]\n[![ha]]\n[[hamedi7][hamedi8]]\n[[hamedi9]](breaking?)\n\\]]\n]\\]",
         "tokens": [{"name": "paragraph_line"},
             {"name": "wikilink_start"},
             {"name": "wikilink_end"},
@@ -386,7 +386,7 @@ TEST_CASES = [
     },
     {
         "name": "markdown_links",
-        "md": "[[hamedi1](hamedi2)]\n[hamedi3](hamedi4)\n    (hamedi5)[hamedi6]\n    [hamedi7\](hamedi8)\n\[[hamedi9](omedi)]]\n[ham[edi]](hamudi)\n![hamediembed](here)\n![hamediembed1invalid]",
+        "md": "[[hamedi1](hamedi2)]\n[hamedi3](hamedi4)\n    (hamedi5)[hamedi6]\n    [hamedi7\\](hamedi8)\n\\[[hamedi9](omedi)]]\n[ham[edi]](hamudi)\n![hamediembed](here)\n![hamediembed1invalid]",
         "tokens": [{"name": "paragraph_line"},
             {"name": "wikilink_start"},
             {"name": "markdownlink_switch"},
@@ -396,7 +396,7 @@ TEST_CASES = [
             {"name": "markdownlink_switch"},
             {"name": "closing_parenthesis"},
             {"name": "indented_line", "data": (4, "(hamedi5)[hamedi6]")},
-            {"name": "indented_line", "data": (4, "[hamedi7\](hamedi8)")},
+            {"name": "indented_line", "data": (4, "[hamedi7\\](hamedi8)")},
             {"name": "paragraph_line"},
             {"name": "markdownlink_start"},
             {"name": "markdownlink_switch"},
@@ -426,7 +426,7 @@ TEST_CASES = [
     },
     {
         "name": "parenthesis",
-        "md": "\((\))\n",
+        "md": "\\((\\))\n",
         "tokens": [{"name": "paragraph_line"},
             {"name": "opening_parenthesis"},
             {"name": "closing_parenthesis"},
