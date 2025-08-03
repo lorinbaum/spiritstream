@@ -1,6 +1,6 @@
 from pathlib import Path
 import unittest
-from spiritstream.tree import treeify, tokenize, walk, serialize, tokenizeCSS, show, parse, Status
+from spiritstream.tree import treeify, tokenize, walk, serialize, tokenizeCSS, show, parse, css_to_dict, Status
 from spiritstream.helpers import SPACES
 
 TEST_CASES = [
@@ -505,7 +505,6 @@ class test_css_tokenizer(unittest.TestCase):
     def test_all(self):
         with open(Path(__file__).parent / "test.css", "r") as f: css = f.read()
         tree = tokenizeCSS(css)
-        # show(tree)
 
         for node in walk(tree):
             if node.children:
@@ -513,5 +512,9 @@ class test_css_tokenizer(unittest.TestCase):
                     self.assertIs(node, child.parent)
             if node.parent: self.assertTrue(any(node is c for c in node.parent.children))
             self.assertIs(node.status, Status.CLOSED)
+
+        show(tree)
+        from pprint import pprint
+        pprint(css_to_dict(tree))
 
 if  __name__ == "__main__": unittest.main()

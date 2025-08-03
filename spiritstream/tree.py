@@ -1,6 +1,6 @@
 from enum import Enum, auto
 from dataclasses import dataclass
-from typing import List, Optional, Union, Generator, Any, Iterable, Dict
+from typing import List, Optional, Union, Generator, Any, Iterable, Dict, Tuple
 from spiritstream.helpers import SPACES
 import re
 
@@ -368,7 +368,7 @@ def tokenizeCSS(text:str):
                         elif node.name is CSS.RULE:
                             status = getattr(node, "status", None)
                             if status is Status.PSEUDOCLASS:
-                                node.data += (":" + value,)
+                                node.data = (*node.data[:-1], node.data[-1]+":" + value)
                                 node.status = None
                             elif status is Status.OPENED: node = start_node(node, CSSNode(CSS.DECLARATION,  node, [], (value,)))
                             elif status is Status.COMMA:
@@ -416,7 +416,7 @@ def tokenizeCSS(text:str):
                         if node.name is CSS.DECLARATION: assert node.status is Status.NAMED
                         elif node.name is CSS.FUNCTION: assert node.status is Status.OPENED
                         else: raise NotImplementedError(node.name)
-                        node.data += (value,)
+                        node.data += (value.strip("\"\'"),)
                     case "number":
                         if node.name is CSS.DECLARATION: assert node.status is Status.NAMED
                         elif node.name is CSS.FUNCTION: assert node.status is Status.OPENED
@@ -440,3 +440,64 @@ def tokenizeCSS(text:str):
     node.status = Status.CLOSED # close head
     assert node is head
     return head
+
+@dataclass(frozen=True)
+class Color:
+    r:float
+    g:float
+    b:float
+    a:float
+
+def color_from_hex(x:int) -> Color:
+    assert x <= 0xffffffff
+    if x <= 0xfff: return Color(((x & 0xf00) >> 8) / 15, ((x & 0xf0) >> 4) / 15, (x & 0xf) / 15, 1.0)
+    elif x <= 0xffff: return Color(((x & 0xf000) >> 12) / 15, ((x & 0xf00) >> 8) / 15, ((x & 0xf0) >> 4) / 15, (x & 0xf) / 15)
+    elif x <= 0xffffff: return Color(((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255, 1.0)
+    else: return Color(((x & 0xff000000) >> 24) / 255, ((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255)
+
+def css_to_dict(head:CSSNode) -> Dict:
+    css_dict = {}
+    selectors = None
+    k = None
+    for node in walk(head):
+        if node.name is CSS.RULE: selectors = node.data if isinstance(node.data, tuple) else (node.data,)
+        elif node.name is CSS.DECLARATION:
+            if len(node.data) == 1: k = node.data[0] # value is in either function or identity children
+            else:
+                k, v = node.data[0], node.data[1:]
+                k, v = expand_css_shorthand(k, v)
+                for k0, v0 in zip(k, v):
+                    v0 = color_from_hex(int(v0[1:], base=16)) if isinstance(v0, str) and v0.startswith("#") else v0
+                    for s in selectors: css_dict.setdefault(s, {})[k0] = v0
+        elif node.name in (CSS.IDENTITY, CSS.FUNCTION):
+            for s in selectors:
+                if node.name is CSS.IDENTITY: css_dict.setdefault(s, {})[k] = node.data[0]
+                else:
+                    current = css_dict.setdefault(s, {}).setdefault(k, [])
+                    if not isinstance(current, list): css_dict[s][k] = [current]
+                    css_dict[s][k].append(node)
+    return css_dict
+
+# NOTE: margin: 0, auto not yet supported because mix of identity and other
+# NOTE: margin: calc(100% - 5px) not yet supported
+
+def expand_css_shorthand(k, v) -> Tuple[Tuple, Tuple]:
+    # process shorthands for padding and margin
+    if k in ["padding", "margin"]:
+        k = (k+"-top", k+"-right", k+"-bottom", k+"-left")
+        v_u = [] # value - unit pairs
+        for v0 in v:
+            if v0 in ["em", "rem", "px"]:
+                assert len(v_u) > 0 and len(v_u[-1]) == 1
+                v_u[-1] = (*v_u[-1], v0)
+            else:
+                assert len(v_u) == 0 or len(v_u[-1]) == 2 or v_u[-1][0] == 0
+                v_u.append((v0,))
+        assert len(v_u) in [1, 2, 4]
+        if len(v_u) == 1: v = (v_u[0],) * 4
+        elif len(v_u) == 2: v = (v_u[0], v_u[1]) * 2
+        elif len(v_u) == 4: v = v_u
+        return k, v
+    return (k,), (v,) if len(v) > 2 else v
+
+def parseCSS(text:str) -> Dict: return css_to_dict(tokenizeCSS(text))
