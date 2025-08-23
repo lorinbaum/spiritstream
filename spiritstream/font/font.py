@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from typing import List
 from spiritstream.vec import vec2
+from typing import Union
+from pathlib import Path
 
 class Font:
-    def __init__(self, path:str):
-        assert path.endswith(".ttf"), f"Can't load {path}. Only True Type fonts (.tff) are supported."
+    def __init__(self, path:Union[str, Path]):
+        assert (path := Path(path)).suffix == ".ttf", f"Can't load {path}. Only True Type fonts (.tff) are supported."
         from spiritstream.font import ttf
         self.engine = ttf.TTF(path)
 
