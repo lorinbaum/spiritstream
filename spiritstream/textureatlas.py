@@ -1,9 +1,5 @@
-from spiritstream.font import Font
-from spiritstream.vec import vec2
 from spiritstream.bindings.opengl import *
 from typing import List, Dict, Tuple
-import math
-from enum import Enum, auto
 
 # from https://github.com/tinygrad/tinygrad/blob/master/tinygrad/helpers.py
 def fully_flatten(l):
@@ -53,9 +49,7 @@ class TextureAtlas:
         Finds the lowest leftmost position to fit a rectangle of size (w, h).
         self.skyline a list of (x, y) pairs, marking the start of each "step" in the skyline profile.
         """
-        if len(bitmap) == 0: 
-            return
-            # self.coordinates[id] = (0, 0, 0, 0)
+        if len(bitmap) == 0: return
         assert isinstance(bitmap, list) and isinstance(bitmap[0], list), "Bitmap must be 3D list: rows x column x channels. Values must be either float or int. "
         if self.channels == 1: assert isinstance(bitmap[0][0], int), bitmap[0][0]
         else: assert isinstance(bitmap[0][0], list) and isinstance(bitmap[0][0][0], int)
@@ -75,7 +69,12 @@ class TextureAtlas:
                 j += 1
             if width_left > 0 or max_y + h > self.size: continue
             if pos is None or max_y < pos[2] or (max_y == pos[2] and x < pos[1]): pos = (i, x, max_y)
-        assert pos is not None, f"Could not fit texture {w}x{h} in the atlas."
+        if pos is None:
+            from spiritstream.image import Image
+            from pathlib import Path
+            p = Path(__file__).parent.parent / "GlyphAtlas.bmp"
+            Image.write(list(reversed(self.bitmap)), p)
+            raise NotImplementedError(f"Could not fit texture {w}x{h} in the atlas. For debugging, writing bitmap to {p}")
         i, x, y = pos
         # Update skyline: insert new step and remove covered steps
         self.skyline.insert(i, (x, y + h))
