@@ -1,6 +1,6 @@
 @font-face {
   font-family: "Fira Code";
-  src: url("./assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf") format("truetype");
+  src: url("../assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf") format("truetype");
 }
 
 * {
@@ -11,26 +11,21 @@
 }
 
 body {
-    line-height: 1.5;
-    font-family: "Fira Code";
-    font-size: 15px;
-    color: #e38864;
-    margin: auto;
-    width: 500px;
-    background-color: black;
+  line-height: 1.5;
+  font-family: "Fira Code";
+  font-size: 20px;
+  color: #e38864;
+  margin: auto;
+  width: 500px;
+  background-color: black;
 }
 
-
 a {
-    color: #f0719d;
+  color: #f0719d;
 }
 
 a:visited {
   color: #d43f58;
-}
-
-span, p {
-  hyphens: auto;
 }
 
 blockquote {
@@ -53,10 +48,6 @@ h2, h4, h6 { font-weight: 600; text-transform: uppercase; }
 
 ul, ol {
   padding-left: 30px;
-}
-
-ul {
-  list-style-type: disc;
 }
 
 code {
