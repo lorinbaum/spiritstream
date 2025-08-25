@@ -165,54 +165,64 @@ class Line:
 # something like g = next((fonŧ[g] for font in fonts if g in font))
 def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, color:Color, lineheight:float, newline_x:float=None) -> List[Line]:
     """Returns LINE nodes to add to the node tree and populates quad buffers to draw the text"""
-    # NOTE: half of additional line-height applies before the element, half after
-    # lineheight_margin = max(lineheight - fontsize, 0) / 2  
-    # charpos = vec2(x, y+fontsize) # bottom left corner of glyphs
+    cx = x # character x offset
+    linepos = vec2(x, y) # top left corner of line hitbox
+    if newline_x is None: newline_x = x
+    assert cx <= newline_x + width
+    ret, newline, line_strings = [], True, [""]
+    lstart = 0 # char index where line started
+    xs = [] # cursor x positions
+    for idx, c in enumerate(text):
+        xs.append(cx)
+        if c == "\n":
+            ret.append(Line(linepos.x, linepos.y, cx - linepos.x, lineheight, lstart, idx+1, newline, xs))
+            cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
+            newline, xs, lstart = True, [], idx+1
+            line_strings.append("")
+            continue
+        g = SS.fonts[font].glyph(c, fontsize, 72) # NOTE: dpi is 72 so the font renderer does no further scaling. It uses 72 dpi baseline.
+        if cx + g.advance > newline_x + width:
+            wrap_idx = fwrap + 1 if (fwrap:=line_strings[-1].rfind(" ")) >= 0 else len(line_strings[-1])
+            if wrap_idx == len(line_strings[-1]) and line_strings[-1][-1] == " ": # no wrapping necessary
+                ret.append(Line(linepos.x, linepos.y, cx - linepos.x, lineheight, lstart, idx+1, newline, xs))
+                cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
+                newline, xs, lstart = False, [cx], idx+1
+                line_strings.append("")
+            else:
+                if wrap_idx == len(line_strings[-1]): # no " " in line_string, insert hyphen and wrap one earlier to make space for it
+                    line_strings.append(line_strings[-1][-1])
+                    line_strings[-2] = line_strings[-2][:-1] + "-"
+                    wrap_idx -= 1
+                else:
+                    line_strings.append(line_strings[-1][wrap_idx:])
+                    line_strings[-2] = line_strings[-2][:wrap_idx]
+                ret.append(Line(linepos.x, linepos.y, xs[wrap_idx] - linepos.x, lineheight, lstart, lstart + wrap_idx, newline, xs[:wrap_idx+1]))
+                newline, xs, lstart = False, [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]], lstart + wrap_idx # TODO: test +1 or not
+                cx, linepos = xs[-1], vec2(newline_x, linepos.y + lineheight)
+
+        line_strings[-1] += c
+        cx += g.advance
+
+    xs.append(cx) # first position after the last character
+    if line_strings[-1] != "": ret.append(Line(*linepos.components(), cx - linepos.x, lineheight, lstart, idx+1, newline, xs))
+
+    global tex_quad_instance_count, tex_quad_instance_stride, tex_quads_changed
     ascentpx = SS.fonts[font].engine.hhea.ascent * fontsize / SS.fonts[font].engine.head.unitsPerEM
     descentpx = SS.fonts[font].engine.hhea.descent * fontsize / SS.fonts[font].engine.head.unitsPerEM
     total = ascentpx - descentpx
-    charpos = vec2(x, y + ascentpx + (lineheight - total)/2) # bottom left corner of glyphs
-    linepos = vec2(x, y) # top left corner of line hitbox
-    if newline_x is None: newline_x = x
-    assert charpos.x <= newline_x + width
-    global tex_quad_instance_count
-    ret, newline = [], True
-    # ret, newline, instance_count = [], True, 0
-    lstart = 0 # char index where line started
-    xs = [] # cursor x positions
-    for i, c in enumerate(text):
-        xs.append(charpos.x)
-        if c == "\n":
-            ret.append(Line(*linepos.components(), charpos.x - linepos.x, lineheight, lstart, i+1, newline, xs))
-            newline, xs, lstart = True, [], i+1
-            charpos, linepos = vec2(newline_x, charpos.y + lineheight), vec2(newline_x, linepos.y + lineheight)
-            continue
-        g = SS.fonts[font].glyph(c, fontsize, 72) # NOTE: dpi is 72 so the font renderer does no further scaling. It uses 72 dpi baseline.
-        if charpos.x + g.advance > newline_x + width:
-            ret.append(Line(*linepos.components(), charpos.x - linepos.x, lineheight, lstart, i+1, newline, xs))
-            newline, xs, lstart = False, [], i+1
-            charpos, linepos = vec2(newline_x, charpos.y + lineheight), vec2(newline_x, linepos.y + lineheight)
-        if c == " ":
-            charpos.x += g.advance
-            continue
-        key = f"{font}_{ord(c)}_{fontsize}_{72}"
-        u,v,w,h = SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, SS.fonts[font].render(c, fontsize, 72))
-        instance_data = [
-            charpos.x + g.bearing.x, charpos.y + (g.size.y - g.bearing.y), 0.5, # pos
-            g.size.x, -g.size.y, # size
-            u, v, # uv offset
-            w, h, # uv size
-            color.r, color.g, color.b, color.a # color
-        ]
-        tex_quad_instance_data[tex_quad_instance_count*(s:=len(instance_data)):(tex_quad_instance_count+1)*s] = instance_data
-        global tex_quads_changed
-        tex_quads_changed = True
-        tex_quad_instance_count += 1
-        charpos.x += g.advance
-
-    xs.append(charpos.x) # first position after the last character
-    if lstart < len(text): ret.append(Line(*linepos.components(), charpos.x - linepos.x, lineheight, lstart, i+1, newline, xs))
+    for s, l in zip(line_strings, ret):
+        for i, c in enumerate(s):
+            g = SS.fonts[font].glyph(c, fontsize, 72)
+            if c != " ":
+                key = f"{font}_{ord(c)}_{fontsize}"
+                instance_data = [l.cursorxs[i] + g.bearing.x, l.y + ascentpx + (lineheight - total)/2 + (g.size.y - g.bearing.y), 0.5, # pos
+                    g.size.x, -g.size.y, # size
+                    *(SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, SS.fonts[font].render(c, fontsize, 72))), # uv offset and size
+                    color.r, color.g, color.b, color.a] # color 
+                tex_quad_instance_data[(count:=tex_quad_instance_count)*(stride:=tex_quad_instance_stride):(count+1)*stride] = instance_data
+                tex_quad_instance_count, tex_quads_changed = tex_quad_instance_count + 1, True
     return ret
+
 
 # class Text:
 #     def __init__(self, text:str, x, y, w, h, color):
