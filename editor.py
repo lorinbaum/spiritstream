@@ -183,19 +183,14 @@ def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, colo
         g = SS.fonts[font].glyph(c, fontsize, 72) # NOTE: dpi is 72 so the font renderer does no further scaling. It uses 72 dpi baseline.
         if cx + g.advance > newline_x + width:
             wrap_idx = fwrap + 1 if (fwrap:=line_strings[-1].rfind(" ")) >= 0 else len(line_strings[-1])
-            if wrap_idx == len(line_strings[-1]) and line_strings[-1][-1] == " ": # no wrapping necessary
+            if wrap_idx == len(line_strings[-1]): # no wrapping necessary, just cut off
                 ret.append(Line(linepos.x, linepos.y, cx - linepos.x, lineheight, lstart, idx+1, newline, xs))
                 cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
                 newline, xs, lstart = False, [cx], idx+1
                 line_strings.append("")
             else:
-                if wrap_idx == len(line_strings[-1]): # no " " in line_string, insert hyphen and wrap one earlier to make space for it
-                    line_strings.append(line_strings[-1][-1])
-                    line_strings[-2] = line_strings[-2][:-1] + "-"
-                    wrap_idx -= 1
-                else:
-                    line_strings.append(line_strings[-1][wrap_idx:])
-                    line_strings[-2] = line_strings[-2][:wrap_idx]
+                line_strings.append(line_strings[-1][wrap_idx:])
+                line_strings[-2] = line_strings[-2][:wrap_idx]
                 ret.append(Line(linepos.x, linepos.y, xs[wrap_idx] - linepos.x, lineheight, lstart, lstart + wrap_idx, newline, xs[:wrap_idx+1]))
                 newline, xs, lstart = False, [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]], lstart + wrap_idx # TODO: test +1 or not
                 cx, linepos = xs[-1], vec2(newline_x, linepos.y + lineheight)
