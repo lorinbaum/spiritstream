@@ -163,7 +163,7 @@ class Line:
 
 # TODO: select font more carefully. may contain symbols not in font
 # something like g = next((fonŧ[g] for font in fonts if g in font))
-def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, color:Color, lineheight:float, newline_x:float=None) -> List[Line]:
+def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, color:Color, lineheight:float, newline_x:float=None, align="left") -> List[Line]:
     """Returns LINE nodes to add to the node tree and populates quad buffers to draw the text"""
     cx = x # character x offset
     linepos = vec2(x, y) # top left corner of line hitbox
@@ -200,6 +200,8 @@ def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, colo
 
     xs.append(cx) # first position after the last character
     if line_strings[-1] != "": ret.append(Line(*linepos.components(), cx - linepos.x, lineheight, lstart, idx+1, newline, xs))
+    if align == "right": ret = [Line(l.x+(shift:=x+width-l.w-l.x),l.y,l.w,l.h,l.start,l.end,l.newline,[c+shift for c in l.cursorxs]) for l in ret]
+    elif align == "center": ret = [Line(l.x+(shift:=(x+width-l.w-l.x)/2),l.y,l.w,l.h,l.start,l.end,l.newline,[c+shift for c in l.cursorxs]) for l in ret]
 
     global tex_quad_instance_count, tex_quad_instance_stride, tex_quads_changed
     ascentpx = SS.fonts[font].engine.hhea.ascent * fontsize / SS.fonts[font].engine.head.unitsPerEM
@@ -436,8 +438,17 @@ def render_tree(node:Node, css_rules:Dict, pstyle:Dict=None, _frame:Node=None) -
         style["_inline"] = pstyle["_inline"] + vec2(style["margin-left"], 0)
         node.x, node.y = style["_inline"].x, style["_inline"].y
         if node.k is K.TEXT:
+            y = node.y
+            if node.parent.k is K.LI:
+                if node.parent.parent.k is K.UL:
+                    y = node.y + style["font-size"] * 0.066666 # hack to approximate browser rendering. Shift without changing node.y for talled node.
+                    text("•", node.x - 1.25 * style["font-size"], y, style["font-size"], style["font-family"], style["font-size"]*1.4, style["color"],
+                         style["line-height"]*1.075, align="right")
+                elif node.parent.parent.k is K.OL:
+                    text(d:=f"{node.parent.digit}.", node.x - (len(d)+0.5) * style["font-size"], y, style["font-size"] * len(d), style["font-family"],
+                         style["font-size"]*1.05, style["color"], style["line-height"]*1.075, align="right")
             t = _frame.text[node.start:node.end].upper() if style.get("text-transform") == "uppercase" else _frame.text[node.start:node.end]
-            node.children.extend(text(t, node.x, node.y, pstyle["_block"].x + style["_width"] - style["_inline"].x,
+            node.children.extend(text(t, node.x, y, pstyle["_block"].x + style["_width"] - style["_inline"].x,
                                       style["font-family"], style["font-size"], style["color"], style["line-height"], pstyle["_block"].x))
             c = node.children[-1]
             style["_inline"] = vec2(c.x + c.w, c.y)
@@ -483,7 +494,7 @@ def csspx(pstyle:Dict, style:Dict, k:str) -> float:
         elif u == "%": return pstyle["_width"] * v / 100
     return v[0] if isinstance(v, tuple) and len(v) == 1 else v
 
-SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1000)
+SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1400)
 SCENE = Node(K.SCENE, SS, x=0, y=0)
 SS.children = [SCENE]
 
