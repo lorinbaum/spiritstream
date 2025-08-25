@@ -196,7 +196,6 @@ def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, colo
             charpos.x += g.advance
             continue
         key = f"{font}_{ord(c)}_{fontsize}_{72}"
-        # u,v,w,h = SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, SS.fonts[font].render(c, fontsize, SS.dpi))
         u,v,w,h = SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, SS.fonts[font].render(c, fontsize, 72))
         instance_data = [
             charpos.x + g.bearing.x, charpos.y + (g.size.y - g.bearing.y), 0.5, # pos
@@ -404,8 +403,7 @@ def render_tree(node:Node, css_rules:Dict, pstyle:Dict=None, _frame:Node=None) -
     """
     if node.k is K.FRAME: _frame = node
     # inherit and apply style
-    # if pstyle is None: pstyle = {"font-size": (16.0, "px")}
-    if pstyle is None: pstyle = {}
+    if pstyle is None: pstyle = {"font-size": (16.0, "px")}
     for k, v in {"_block": vec2(0, 0), "_inline": vec2(0, 0), "_margin": vec2(0, 0), "_width": 0.0}.items(): pstyle.setdefault(k, v)
     assert all([isinstance(v, vec2) for v in [pstyle["_block"], pstyle["_inline"], pstyle["_margin"]]]) and isinstance(pstyle["_width"], float)
     style = {k:v for k, v in pstyle.items() if k in HERITABLE_STYLES}
@@ -446,12 +444,14 @@ def render_tree(node:Node, css_rules:Dict, pstyle:Dict=None, _frame:Node=None) -
         if isinstance(child, Node): for_children["_block"], for_children["_inline"], for_children["_margin"] = render_tree(child, css_rules, for_children, _frame)
     style.update({k:v for k,v in for_children.items() if k in ["_block", "_inline", "_margin", "_width"]})
 
-
     # update _block, _inline and _margin for return
     if style["display"] == "block":
         if node.children:
             node.h = (end := node.children[-1].y + node.children[-1].h + style["padding-bottom"]) - node.y
-            # TODO: draw background quad if color is set
+            if (c:=style.get("background-color")) and isinstance(c, Color): # ignoring "black", "red" and such
+                global quads_changed, quad_instance_count
+                quad_instance_data[quad_instance_count*9:(quad_instance_count+1)*9] = [node.x, node.y, 0.6, node.w, node.h, (c:=style["background-color"]).r, c.g, c.b, c.a]
+                quads_changed, quad_instance_count = True, quad_instance_count + 1
             return (_block:=vec2(pstyle["_block"].x, end)), _block, vec2(0, style["margin-bottom"]) # _block, _inline, _margin
         else:
             node.h = style["padding-top"] + style["padding-bottom"]
@@ -578,7 +578,8 @@ glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float
 glEnableVertexAttribArray(1)
 # instances
 quads_changed = False
-quad_instance_data = [0] * 9 # first data is for cursor, later data for selection
+quad_instance_count = 0
+quad_instance_data = [0] * 9 # first data is for cursor, later data for selection and other quads
 quad_instance_stride = 9 * ctypes.sizeof(ctypes.c_float)
 quad_instance_vbo = ctypes.c_uint()
 glGenBuffers(1, ctypes.byref(quad_instance_vbo))
@@ -666,17 +667,17 @@ while not glfwWindowShouldClose(window):
     # NOTE: quads are rendered before textured quads because glyphs (textured quads) have transparency.
 
     # quads
-    # if quads_changed: # upload buffer
-    #     quad_instance_data_ctypes = (ctypes.c_float * len(quad_instance_data))(*quad_instance_data)
-    #     glBindBuffer(GL_ARRAY_BUFFER, quad_instance_vbo)
-    #     glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(quad_instance_data_ctypes), quad_instance_data_ctypes, GL_DYNAMIC_DRAW)
-    #     glBindBuffer(GL_ARRAY_BUFFER, 0)
-    #     quads_changed = False
-    # quadShader.use()
-    # quadShader.setUniform("scale", scale, "2f") # inverted y axis. from my view (0,0) is the top left corner, like in browsers
-    # quadShader.setUniform("offset", offset, "2f")
-    # glBindVertexArray(quad_VAO)
-    # glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, 1+text.selection.instance_count) # only cursor for now
+    if quads_changed: # upload buffer
+        quad_instance_data_ctypes = (ctypes.c_float * len(quad_instance_data))(*quad_instance_data)
+        glBindBuffer(GL_ARRAY_BUFFER, quad_instance_vbo)
+        glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(quad_instance_data_ctypes), quad_instance_data_ctypes, GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        quads_changed = False
+    quadShader.use()
+    quadShader.setUniform("scale", scale, "2f") # inverted y axis. from my view (0,0) is the top left corner, like in browsers
+    quadShader.setUniform("offset", offset, "2f")
+    glBindVertexArray(quad_VAO)
+    glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, quad_instance_count)
     
     # texture quads
     glBindTexture(GL_TEXTURE_2D, SS.glyphAtlas.texture)
@@ -715,4 +716,5 @@ glDeleteVertexArrays(1, quad_VAO)
 glDeleteBuffers(1, tex_quad_instance_vbo)
 glDeleteBuffers(1, quad_instance_vbo)
 texquadShader.delete()
+quadShader.delete()
 glfwTerminate()
