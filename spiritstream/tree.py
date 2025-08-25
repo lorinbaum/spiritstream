@@ -286,48 +286,37 @@ def walk(node, level=None, seen=None) -> Generator[Node, None, None]:
 
 def show(node): [print(f"{' '*SPACES*l}{n}") for n,l in walk(node, level=0)]
 
-def serialize(head:Node, text:str) -> str:
+def serialize(head:Node) -> str:
     """node tree to html"""
-    ret = """<!DOCTYPE html><html><head><link rel="stylesheet" href="test.css"/><title>Spiritstream</title></head>"""
+    ret = f"<!DOCTYPE html>"
+    assert head.k is K.FRAME
+    text = head.text
     prevNode, prevLevel = None, -1
     for node, level in walk(head, level=0):
-        assert node.name != "bolditalic", "bolditalic nodes should be replace by bold and italic nodes"
-        if node.name == "text":
-            if node.parent.name in ["link", "embed"] and ((node.parent.data == "wiki" and node is not node.parent.children[0]) or \
-            (node.parent.data == "md switched" and node is not node.parent.children[0])): continue
-            ret += text[node.start:node.end].replace("\n", "<br>")
-        else:
-            while prevLevel >= level:
-                ret += htmltag(prevNode, text, open=False)
-                assert prevNode.parent is not None
-                prevNode, prevLevel = prevNode.parent, prevLevel - 1
-            ret += htmltag(node, text)
-            prevNode = node
-            prevLevel = level
+        if isinstance(node, Node):
+            assert node.k is not K.BI, "bolditalic nodes should be replace by bold and italic nodes during parsing"
+            if node.k is K.TEXT: ret += text[node.start:node.end].strip("\n ").replace("\n", "<br>")
+            else:
+                while prevLevel >= level:
+                    ret += htmltag(prevNode, open=False)
+                    assert prevNode.parent is not None
+                    prevNode, prevLevel = prevNode.parent, prevLevel - 1
+                ret += htmltag(node)
+                prevNode = node
+                prevLevel = level
     while prevNode is not head:
-        ret += htmltag(prevNode, text, open=False)
+        ret += htmltag(prevNode, open=False)
         prevNode = prevNode.parent
-    return ret + htmltag(head, text, open=False) + "</html>"
+    return ret + htmltag(head, open=False)
 
-def htmltag(node:Node, text:str, open=True) -> str:
-    match node.name:
-        case "body": return f"<{'' if open else '/'}body>"
-        case "heading": return f"<h{min(node.data, 6)}>" if open else f"</h{min(node.data, 6)}>"
-        case "blockquote": return f"<{'' if open else '/'}{node.name}>"
-        case "paragraph": return f"<{'' if open else '/'}p>"
-        case "horizontal_rule" if open: return "<hr>" # no closing tag
-        case "codeblock": return "<div class=\"codeblock\"><code><pre>" + "\n".join(node.data[1]) if open else "</pre></code></div>"
-        case "empty_line" if open: return "<br>" # no closing tag
-        case "bold": return f"<{'' if open else '/'}b>"
-        case "italic": return f"<{'' if open else '/'}i>"
-        case "strikethrough": return f"<{'' if open else '/'}s>"
-        case "link": return f"<a href=\"{href(node, text)}\">" if open else "</a>"
-        case "embed" if open: return f"<img src=\"{href(node, text)}\"/>" # no closing tag
-        case "double_inline_code": return "<code>" if open else "</code>"
-        case "inline_code": return "<code>" if open else "</code>"
-        case "list": return f"<{'' if open else '/'}{'ol' if node.data[1] == 'ordered' else 'ul'}>"
-        case "listitem": return f"<{'' if open else '/'}li" + ((" value=\"" + str(node.data) + "\"") if node.data is not None and open else "") + ">"
-        case _: return ""
+def htmltag(node:Node, open=True) -> str:
+    # TODO: other special kinds, like links, codeblocks, inline code
+    match node.k:
+        case K.FRAME:
+            return f"""<html><head><link rel="stylesheet" href="./test/test.css"/><title>{getattr(node, "title", "Unnamed frame")}</title></head>""" \
+            if open else "</html>"
+        case K.EMPTY_LINE: return "<br>" if open else ""
+        case _: return f"<{'' if open else '/'}{node.k.name.lower()}>"
 
 INTERNAL_LINK_TARGETS = set()
 def href(node:Node, text:str) -> str:
