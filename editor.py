@@ -16,6 +16,8 @@ if PRINT_TIMINGS: FIRSTTIME = LASTTIME = time.time()
 
 TEXTPATH = "text.txt"
 CSSPATH = "test/test.css"
+EDIT_VIEW = True
+FORMATTING_COLOR = color_from_hex(0xaaa)
 
 """
 selection quads per node (could try and merge)
@@ -55,60 +57,63 @@ class Cursor:
 """
 
 
-# class Cursor:
-#     def __init__(self, text:"Text"):
-#         self.text = text # keep reference for cursor_coords and linewraps
-#         self.left = None
-#         self.rpos = vec2() # relative to self.text
-#         self._apos = vec2() # absolute. derived from self.text.x, self.text.y and rpos. don't set directly or derive from self.rpos.
-#         self.idx = None
-#         self.line = None
-#         self.x = 0 # Moving up and down using arrow keys can lead to drifting left or right. To avoid, stores original x in this variable.
+class Cursor:
+    def __init__(self, frame:Node):
+        self.frame = frame # keep reference for cursor_coords and linewraps
+        self.idx = 0
+        self.pos = vec2()
+        self.x = None
+        # self.left = None
+        # self.rpos = vec2() # relative to self.text
+        # self._apos = vec2() # absolute. derived from self.text.x, self.text.y and rpos. don't set directly or derive from self.rpos.
+        # self.idx = None
+        # self.line = None
+        # self.x = 0 # Moving up and down using arrow keys can lead to drifting left or right. To avoid, stores original x in this variable.
 
-#         self.update(0)
+        # self.update(0)
 
-#     def update(self, pos:Union[int, vec2], allow_drift=True, left=False):
-#         assert isinstance(left, bool) and isinstance(allow_drift, bool)
-#         assert isinstance(pos, (int, vec2)), f"Wrong argument type \"pos\": {type(pos)}. Can only use integer (index of char in the text) or vec2 (screen coordinate)"
-#         cursorcoords = self.text.cursorcoords
-#         if isinstance(pos, vec2): # get idx from pos
-#             idx = 0
-#             if not allow_drift: pos.x = self.x
-#             if pos.y > self.text.cursorcoords[-1].y + (self.text.lineheightUsed) / 2: idx, allow_drift = len(self.text.cursorcoords) - 1, True
-#             elif pos.y < self.text.cursorcoords[0].y - (self.text.lineheightUsed) / 2: idx, allow_drift = 0, True
-#             else:
-#                 closest_x = closest_y = math.inf
-#                 for i, l in enumerate(self.text.visible_lines):
-#                     if (dy:=abs(pos.y - l.y)) < closest_y: closest_y, self.line = dy, l
-#                     else: break
-#                 for i, c in enumerate([vec2(-2.01, None)] + self.text.cursorcoords[self.line.start+1:self.line.end+1]):
-#                     if (dx:=abs(pos.x - c.x)) < closest_x:
-#                         closest_x, idx, left = dx, self.line.start + i, i == 0 and not self.line.newline
-#                     else: break
-#         else:
-#             idx = pos % len(cursorcoords)
-#             self.line = next((l for l in self.text.lines if l.start <= idx <= l.end))
-#         if idx == self.idx: return
-#         self.idx = idx
-#         self.left = left
-#         self.rpos = vec2(-2, cursorcoords[(self.idx + 1) % len(cursorcoords)].y) if left else cursorcoords[self.idx] # relative
-#         self._apos = self.rpos + vec2(self.text.x, self.text.y) # absolute
+    def update(self, pos:Union[int, vec2], allow_drift=True, left=False):
+        assert isinstance(left, bool) and isinstance(allow_drift, bool)
+        assert isinstance(pos, (int, vec2)), f"Wrong argument type \"pos\": {type(pos)}. Can only use integer (index of char in the text) or vec2 (screen coordinate)"
+        cursorcoords = self.text.cursorcoords
+        if isinstance(pos, vec2): # get idx from pos
+            idx = 0
+            if not allow_drift: pos.x = self.x
+            if pos.y > self.text.cursorcoords[-1].y + (self.text.lineheightUsed) / 2: idx, allow_drift = len(self.text.cursorcoords) - 1, True
+            elif pos.y < self.text.cursorcoords[0].y - (self.text.lineheightUsed) / 2: idx, allow_drift = 0, True
+            else:
+                closest_x = closest_y = math.inf
+                for i, l in enumerate(self.text.visible_lines):
+                    if (dy:=abs(pos.y - l.y)) < closest_y: closest_y, self.line = dy, l
+                    else: break
+                for i, c in enumerate([vec2(-2.01, None)] + self.text.cursorcoords[self.line.start+1:self.line.end+1]):
+                    if (dx:=abs(pos.x - c.x)) < closest_x:
+                        closest_x, idx, left = dx, self.line.start + i, i == 0 and not self.line.newline
+                    else: break
+        else:
+            idx = pos % len(cursorcoords)
+            self.line = next((l for l in self.text.lines if l.start <= idx <= l.end))
+        if idx == self.idx: return
+        self.idx = idx
+        self.left = left
+        self.rpos = vec2(-2, cursorcoords[(self.idx + 1) % len(cursorcoords)].y) if left else cursorcoords[self.idx] # relative
+        self._apos = self.rpos + vec2(self.text.x, self.text.y) # absolute
         
-#         # scroll into view
-#         if self._apos.y - self.text.lineheightUsed < Scene.y:
-#             Scene.y = self._apos.y - self.text.lineheightUsed
-#             Scene.scrolled = True
-#         elif self._apos.y > Scene.y + Scene.h:
-#             Scene.y = self._apos.y - Scene.h
-#             Scene.scrolled = True
+        # scroll into view
+        if self._apos.y - self.text.lineheightUsed < Scene.y:
+            Scene.y = self._apos.y - self.text.lineheightUsed
+            Scene.scrolled = True
+        elif self._apos.y > Scene.y + Scene.h:
+            Scene.y = self._apos.y - Scene.h
+            Scene.scrolled = True
 
-#         h = self.text.lineheightUsed
-#         #                           x,y                                    z    w   h  r    g    b    a
-#         quad_instance_data[:9] = [*(self._apos + vec2(0, 3)).components(), 0.2, 2, -h, 1.0, 1.0, 1.0, 1.0]
-#         global quads_changed
-#         quads_changed = True
+        h = self.text.lineheightUsed
+        #                           x,y                                    z    w   h  r    g    b    a
+        quad_instance_data[:9] = [*(self._apos + vec2(0, 3)).components(), 0.2, 2, -h, 1.0, 1.0, 1.0, 1.0]
+        global quads_changed
+        quads_changed = True
 
-#         if allow_drift: self.x = self.rpos.x
+        if allow_drift: self.x = self.rpos.x
 
 # class Selection:
 #     def __init__(self, text:"Text"):
@@ -163,7 +168,7 @@ class Line:
 
 # TODO: select font more carefully. may contain symbols not in font
 # something like g = next((fonŧ[g] for font in fonts if g in font))
-def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, color:Color, lineheight:float, newline_x:float=None, align="left") -> List[Line]:
+def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, color:Color, lineheight:float, newline_x:float=None, align="left", start=0) -> List[Line]:
     """Returns LINE nodes to add to the node tree and populates quad buffers to draw the text"""
     cx = x # character x offset
     linepos = vec2(x, y) # top left corner of line hitbox
@@ -175,7 +180,7 @@ def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, colo
     for idx, c in enumerate(text):
         xs.append(cx)
         if c == "\n":
-            ret.append(Line(linepos.x, linepos.y, cx - linepos.x, lineheight, lstart, idx+1, newline, xs))
+            ret.append(Line(linepos.x, linepos.y, cx - linepos.x, lineheight, start+lstart, start + idx+1, newline, xs))
             cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
             newline, xs, lstart = True, [], idx+1
             line_strings.append("")
@@ -184,14 +189,14 @@ def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, colo
         if cx + g.advance > newline_x + width:
             wrap_idx = fwrap + 1 if (fwrap:=line_strings[-1].rfind(" ")) >= 0 else len(line_strings[-1])
             if wrap_idx == len(line_strings[-1]): # no wrapping necessary, just cut off
-                ret.append(Line(linepos.x, linepos.y, cx - linepos.x, lineheight, lstart, idx+1, newline, xs))
+                ret.append(Line(linepos.x, linepos.y, cx - linepos.x, lineheight, start+lstart, start+idx+1, newline, xs))
                 cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
                 newline, xs, lstart = False, [cx], idx+1
                 line_strings.append("")
             else:
                 line_strings.append(line_strings[-1][wrap_idx:])
                 line_strings[-2] = line_strings[-2][:wrap_idx]
-                ret.append(Line(linepos.x, linepos.y, xs[wrap_idx] - linepos.x, lineheight, lstart, lstart + wrap_idx, newline, xs[:wrap_idx+1]))
+                ret.append(Line(linepos.x, linepos.y, xs[wrap_idx] - linepos.x, lineheight, start+lstart, start + lstart + wrap_idx, newline, xs[:wrap_idx+1]))
                 newline, xs, lstart = False, [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]], lstart + wrap_idx # TODO: test +1 or not
                 cx, linepos = xs[-1], vec2(newline_x, linepos.y + lineheight)
 
@@ -199,7 +204,7 @@ def text(text:str, x:float, y:float, width:float, font:str, fontsize:float, colo
         cx += g.advance
 
     xs.append(cx) # first position after the last character
-    if line_strings[-1] != "": ret.append(Line(*linepos.components(), cx - linepos.x, lineheight, lstart, idx+1, newline, xs))
+    if line_strings[-1] != "": ret.append(Line(*linepos.components(), cx - linepos.x, lineheight, start+lstart, start + idx+1, newline, xs))
     if align == "right": ret = [Line(l.x+(shift:=x+width-l.w-l.x),l.y,l.w,l.h,l.start,l.end,l.newline,[c+shift for c in l.cursorxs]) for l in ret]
     elif align == "center": ret = [Line(l.x+(shift:=(x+width-l.w-l.x)/2),l.y,l.w,l.h,l.start,l.end,l.newline,[c+shift for c in l.cursorxs]) for l in ret]
 
@@ -420,7 +425,6 @@ def render_tree(node:Node, css_rules:Dict, pstyle:Dict=None, _frame:Node=None) -
     for_children = {k:v for k,v in style.items() if k in HERITABLE_STYLES} # pass on before more conversion so relative values are recomputed
     style = {k:csspx(pstyle, style, k) for k in style.keys()} # convert px, em, %, auto to device pixels
 
-    
     style["display"] = style.get("display", "inline" if node.k in INLINE_NODES else "block")
     assert style["display"] in ["inline", "block"]
     # TODO: check syntax in parsing, not processing. maybe should be function to verify generally, use in testing
@@ -434,31 +438,51 @@ def render_tree(node:Node, css_rules:Dict, pstyle:Dict=None, _frame:Node=None) -
         style.update({"_block": (v:=vec2(node.x + style["padding-left"], node.y + style["padding-top"])), "_inline": v, "_margin": vec2(0,0)})
     else:
         style["_width"] = pstyle["_width"]
-        style["_margin"] = vec2(0, style["margin-right"])
+        style["_margin"] = vec2(style["margin-right"], 0)
         style["_inline"] = pstyle["_inline"] + vec2(style["margin-left"], 0)
         node.x, node.y = style["_inline"].x, style["_inline"].y
         if node.k is K.TEXT:
             y = node.y
-            if node.parent.k is K.LI:
+            if node.parent.k is K.LI and not EDIT_VIEW:
                 if node.parent.parent.k is K.UL:
                     y = node.y + style["font-size"] * 0.066666 # hack to approximate browser rendering. Shift without changing node.y for talled node.
                     text("•", node.x - 1.25 * style["font-size"], y, style["font-size"], style["font-family"], style["font-size"]*1.4, style["color"],
-                         style["line-height"]*1.075, align="right")
+                         style["line-height"]*1.075, align="right", start=node.start)
                 elif node.parent.parent.k is K.OL:
                     text(d:=f"{node.parent.digit}.", node.x - (len(d)+0.5) * style["font-size"], y, style["font-size"] * len(d), style["font-family"],
-                         style["font-size"]*1.05, style["color"], style["line-height"]*1.075, align="right")
+                         style["font-size"]*1.05, style["color"], style["line-height"]*1.075, align="right", start=node.start)
             t = _frame.text[node.start:node.end].upper() if style.get("text-transform") == "uppercase" else _frame.text[node.start:node.end]
-            node.children.extend(text(t, node.x, y, pstyle["_block"].x + style["_width"] - style["_inline"].x,
-                                      style["font-family"], style["font-size"], style["color"], style["line-height"], pstyle["_block"].x))
+            node.children = text(t, node.x, y, style["_width"], style["font-family"], style["font-size"], style["color"], style["line-height"],
+                                 pstyle["_block"].x, start=node.start)
             c = node.children[-1]
-            style["_inline"] = vec2(c.x + c.w, c.y)
             style["_block"] = vec2(pstyle["_block"].x, c.y + c.h)
+            style["_inline"] = style["_block"].copy() if t.endswith("\n") else vec2(c.x + c.w, c.y)
     
+    # In EDIT_VIEW insert Lines if first child start later than this node to include formatting text
+    if EDIT_VIEW and node.k not in [K.SS, K.SCENE, K.FRAME, K.BODY]:
+        t = None 
+        if node.children and isinstance(node.children[0], Node) and node.children[0].start > node.start: t = _frame.text[node.start:node.children[0].start]
+        elif not node.children and node.start-node.end != 0: t = _frame.text[node.start:node.end] # node with formatting but no text child
+        if t:
+            if node.k not in INLINE_NODES: style["_inline"] = style["_block"].copy()
+            lines = text(t, style["_inline"].x, style["_inline"].y, style["_width"], style["font-family"], style["font-size"], FORMATTING_COLOR,
+                         style["line-height"], pstyle["_block"].x, start=node.start)
+            for line in reversed(lines): node.children.insert(0, line)
+            style["_inline"] = vec2(lines[-1].x + lines[-1].w, lines[-1].y)
+            style["_block"] = vec2(pstyle["_block"].x, lines[-1].y + lines[-1].h)
+
     # process children
     for_children.update({k:v for k,v in style.items() if k in ["_block", "_inline", "_margin", "_width"]})
     for child in node.children:
         if isinstance(child, Node): for_children["_block"], for_children["_inline"], for_children["_margin"] = render_tree(child, css_rules, for_children, _frame)
     style.update({k:v for k,v in for_children.items() if k in ["_block", "_inline", "_margin", "_width"]})
+    
+    # In EDIT_VIEW append lines if this is the last child and ends before its parent to include formatting text
+    if EDIT_VIEW and node.k not in [K.SS, K.SCENE, K.FRAME, K.BODY] and node.parent.children[-1] is node and node.end < node.parent.end:
+        node.parent.children.extend(text(_frame.text[node.end:node.parent.end], style["_inline"].x, style["_inline"].y, style["_width"],style["font-family"],
+                                         style["font-size"], FORMATTING_COLOR, style["line-height"], pstyle["_block"].x, start=node.end))
+        style["_inline"] = vec2((c:=node.parent.children[-1]).x + c.w, c.y)
+        style["_block"] = vec2(pstyle["_block"].x, c.y + c.h)
 
     # update _block, _inline and _margin for return
     if style["display"] == "block":
@@ -479,6 +503,7 @@ def render_tree(node:Node, css_rules:Dict, pstyle:Dict=None, _frame:Node=None) -
             node.h = node.children[-1].y + node.children[-1].h - node.y
         else:
             node.w = node.h = 0
+            style["_block"] = pstyle["_block"]
         return style["_block"], style["_inline"], style["_margin"]
 
 def csspx(pstyle:Dict, style:Dict, k:str) -> float:
@@ -494,7 +519,7 @@ def csspx(pstyle:Dict, style:Dict, k:str) -> float:
         elif u == "%": return pstyle["_width"] * v / 100
     return v[0] if isinstance(v, tuple) and len(v) == 1 else v
 
-SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1400)
+SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1600)
 SCENE = Node(K.SCENE, SS, x=0, y=0)
 SS.children = [SCENE]
 

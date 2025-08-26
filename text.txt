@@ -12,6 +12,7 @@ Contact through X or me [at] lorinbaumgarten [dot] com.
 hamedi is here.
 or is he?
 >Hamedi is coming for you ••
+>>hamedi is here too
 
 - hamedi1 multiline bullet point multiline bullet point multiline bullet point
 - hamedi2
@@ -26,3 +27,8 @@ or is he?
 1. hamedi1
 2. hamedi2
     1. hamedi21
+
+---
+
+*hamedi***
+*hamedi* is here **a**
