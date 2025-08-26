@@ -143,6 +143,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                     node.k, node.children = K.B, [Node(K.I, node, node.children, start = node.start + 2, end = tok.start)]
                     for n in node.children[0].children: n.parent = node.children[0]
                 node.end, node = tok.start, node.parent
+        if tok.name == "endoffile": node.data.setdefault("end", tok.end)
         match tok.name:
             case "heading": node = start_node(Node(getattr(K, f"H{min(tok.data, 6)}"), head, start = tok.start))
             case "empty_line": node = start_node(Node(K.EMPTY_LINE, head, start = tok.start))
@@ -210,7 +211,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                 match tok.name:
                     case "italic_start" if node.k is not K.BI: node = start_node(Node(K.I, node, start=tok.start))
                     case "italic_toggle"|"italic_end":
-                        if node.k is K.I: node = end_node(node, tok.start)
+                        if node.k is K.I: node = end_node(node, tok.end)
                         elif node.k is K.BI: # replace bolditalic with opening bold and opening italic. Italic ends here
                             node.k, node.children = K.B, [Node(K.I,node, node.children, start=node.start+2, end=tok.end)]
                             for n in node.children[0].children: n.parent = node.children[0]
@@ -219,29 +220,27 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
 
                     case "bold_start" if node.k is not K.BI: node = start_node(Node(K.B, node, start=tok.start))
                     case "bold_toggle"|"bold_end":
-                        if node.k is K.B: node = end_node(node, tok.start)
+                        if node.k is K.B: node = end_node(node, tok.end)
                         elif node.k is K.BI: # replace bolditalic with opening italic and opening bold. Bold ends here
                             node.k, node.children = K.I, [Node(K.B,node, node.children, start=node.start+1, end=tok.end)]
                             for n in node.children[0].children: n.parent = node.children[0]
-                            # node.children = [Node(K.B, node, node.children, start=node.start + 1, end=tok.end)]
                         elif tok.name == "bold_toggle": node = start_node(Node(K.B, node, start=tok.start))
                         else: add_text(node, tok.start, tok.end) # it's bold end but not in bold node. replace with text
 
                     case "bolditalic_start" if node.k not in [K.I, K.B]: node = start_node(Node(K.BI, node, start=tok.start))
                     case "bolditalic_toggle"|"bolditalic_end":
                         if node.k is K.BI:
-                            # node.children = [Node(K.I, node, node.children, start=node.start + 2, end=tok.end - 2)]
                             node.children = [Node(K.I,node, node.children, start=node.start+2, end=tok.end-2)]
                             for n in node.children[0].children: n.parent = node.children[0]
                             node.end, node.k, node = tok.end, K.B, node.parent
                         elif node.k is K.I:
-                            node = end_node(node, tok.start)
-                            if node.k is K.B: end_node(node, tok.start+1)
+                            node = end_node(node, tok.start+1)
+                            if node.k is K.B: end_node(node, tok.end)
                             else: node = start_node(Node(K.B, node, start=tok.start+1))
                         elif node.k is K.B:
-                            node = end_node(node, tok.start)
-                            if node.k is K.I: node = end_node(node, tok.start+2)
-                            else: node = start_node(Node(K.I, node, start=tok.start + 2))
+                            node = end_node(node, tok.start+2)
+                            if node.k is K.I: node = end_node(node, tok.end)
+                            else: node = start_node(Node(K.I, node, start=tok.start+2))
                         elif tok.name == "bolditalic_toggle": node = start_node(Node(K.BI, node, start=tok.start))
                         else: add_text(node, tok.start, tok.end) # bolitalic end but not in bolitalic. replace with text
 
@@ -263,6 +262,8 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                         elif node.k is not K.DOUBLE_INLINE_CODE: node = start_node(Node(K.INLINE_CODE, node, start=tok.start))
                     case _: add_text(node, tok.start, tok.end) # no valid match means it should be treated as text
             case _: add_text(node, tok.start, tok.end) # no valid match means it should be treated as text
+    for n in reversed(list(walk(head))): # add missing ends. They exist because block nodes add themselves to head without closing previous nodes
+        if isinstance(n, Node) and not getattr(n, "end", None): n.end = n.children[-1].end
     return head
 
 def parse(text:str, head=None) -> Node: return treeify(tokenize(text), head)
@@ -277,7 +278,7 @@ def add_text(node:Node, start:int, end:int):
 
 def start_node(child:Node) -> Node: child.parent.children.append(child); return child
 
-def end_node(node:Node, end) -> Node: node.end, node = end, node.parent; return node
+def end_node(node:Node, end:int) -> Node: node.end, node = end, node.parent; return node
 
 def walk(node, level=None, seen=None) -> Generator[Node, None, None]:
     assert id(node) not in (seen := set() if seen is None else seen) or seen.add(id(node))
