@@ -61,6 +61,7 @@ class K(Enum): # Kind of node
     SS = auto() # top of the tree
     SCENE = auto()
     FRAME = auto()
+    LINE = auto()
 
     BODY = auto()
     H1, H2, H3, H4, H5, H6 = auto(), auto(), auto(), auto(), auto(), auto()
@@ -75,7 +76,7 @@ class K(Enum): # Kind of node
     _LIST, UL, OL, LI = auto(), auto(), auto(), auto()
     TEXT = auto()
 
-INLINE_NODES = {K.BI, K.B, K.I, K.S, K.A, K.IMG, K.INLINE_CODE, K.DOUBLE_INLINE_CODE, K.TEXT}
+INLINE_NODES = {K.BI, K.B, K.I, K.S, K.A, K.IMG, K.INLINE_CODE, K.DOUBLE_INLINE_CODE, K.TEXT, K.LINE}
 LINKS = {K.A, K.IMG}
 
 class Node:
@@ -92,8 +93,16 @@ class Node:
     def __setattr__(self, name, value):
         if name in ("k", "parent", "children", "data"): super().__setattr__(name, value) # Protect core attributes
         else: self.data[name] = value
+
+    def _format(self, v):
+        if isinstance(v, bool): return repr(v)
+        elif isinstance(v, (int, float)): return f"{v:.2f}"
+        elif isinstance(v, list): return "[" + ", ".join(f"{i:.2f}" for i in v[:10]) + (", ...]" if len(v) > 10 else "]")
+        elif isinstance(v, str): return repr(v[:50] + ("..." if len(v) > 50 else "")) 
+        elif isinstance(v, dict): return "dict..."
+        else: return repr(v)
     
-    def __repr__(self): return  f"\033[32m{self.k.name}\033[0m(\033[94mdata=\033[0m{self.data})"
+    def __repr__(self): return  f"\033[32m{self.k.name}\033[0m("+", ".join([f"\033[94m{k}=\033[0m{self._format(v)}" for k,v in self.data.items()]) + ")"
 
 def tokenize(text:str) -> Generator[Token, None, None]:
     text_start = None # because the non-greedy pattern matches single characters, accumulates "text" matches and stores start and end.
@@ -224,6 +233,9 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                         elif node.k is K.BI: # replace bolditalic with opening italic and opening bold. Bold ends here
                             node.k, node.children = K.I, [Node(K.B,node, node.children, start=node.start+1, end=tok.end)]
                             for n in node.children[0].children: n.parent = node.children[0]
+                        elif node.k is K.I and tok.name == "bold_end":
+                            node = end_node(node, tok.start + 1)
+                            add_text(node, tok.start + 1, tok.end)
                         elif tok.name == "bold_toggle": node = start_node(Node(K.B, node, start=tok.start))
                         else: add_text(node, tok.start, tok.end) # it's bold end but not in bold node. replace with text
 
@@ -280,12 +292,20 @@ def start_node(child:Node) -> Node: child.parent.children.append(child); return 
 
 def end_node(node:Node, end:int) -> Node: node.end, node = end, node.parent; return node
 
+def steal_children(parent:Node, thief:Node):
+    for c in parent.children:
+        c.parent = thief
+        thief.children.append(c)
+
 def walk(node, level=None, seen=None) -> Generator[Node, None, None]:
     assert id(node) not in (seen := set() if seen is None else seen) or seen.add(id(node))
     yield node if level is None else (node, level)
     for n in getattr(node, "children", []): yield from walk(n, None if level is None else level+1, seen)
 
 def show(node): [print(f"{' '*SPACES*l}{n}") for n,l in walk(node, level=0)]
+
+def find(node, **kwargs) -> Node: return next((n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))))
+def find_all(node, **kwargs) -> List[Node]: return [n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))]
 
 def serialize(head:Node) -> str:
     """node tree to html"""
@@ -296,7 +316,7 @@ def serialize(head:Node) -> str:
     for node, level in walk(head, level=0):
         if isinstance(node, Node):
             assert node.k is not K.BI, "bolditalic nodes should be replace by bold and italic nodes during parsing"
-            if node.k is K.TEXT: ret += text[node.start:node.end].strip("\n ").replace("\n", "<br>")
+            if node.k is K.TEXT: ret += text[node.start:node.end].replace("\n", "<br>")
             else:
                 while prevLevel >= level:
                     ret += htmltag(prevNode, open=False)
@@ -316,7 +336,7 @@ def htmltag(node:Node, open=True) -> str:
         case K.FRAME:
             return f"""<html><head><link rel="stylesheet" href="./test/test.css"/><title>{getattr(node, "title", "Unnamed frame")}</title></head>""" \
             if open else "</html>"
-        case K.EMPTY_LINE: return "<br>" if open else ""
+        case K.EMPTY_LINE: return "" # TODO: EMPTY_LINE should not exist?
         case _: return f"<{'' if open else '/'}{node.k.name.lower()}>"
 
 INTERNAL_LINK_TARGETS = set()
