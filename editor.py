@@ -16,7 +16,6 @@ if PRINT_TIMINGS: FIRSTTIME = LASTTIME = time.time()
 
 TEXTPATH = "text.txt"
 CSSPATH = "test/test.css"
-EDIT_VIEW = False
 FORMATTING_COLOR = color_from_hex(0xaaa)
 CURSOR_COLOR = color_from_hex(0xfff)
 
