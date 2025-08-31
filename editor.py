@@ -46,7 +46,6 @@ class Cursor:
         
         self.update(self.idx)
 
-    # TODO: consider vertical box even when actually outside the box for accurate positioning using closest.
     def _find(self, node:Node, pos:Union[int, vec2], up:bool=False) -> Node:
         if hasattr(node, "children"):
             if isinstance(pos, int):
@@ -57,10 +56,11 @@ class Cursor:
                 closest, dx, dy = None, math.inf, math.inf
                 for c in node.children:
                     if c.x <= pos.x < c.x + c.w and c.y <= pos.y < c.y + c.h: return self._find(c, pos) # direct hit
-                    center = vec2(c.x+c.w/2, c.y+c.h/2)
-                    if (dy0:=abs(pos.y-center.y)) < dy: dx, dy, closest = abs(pos.x-center.x), dy0, c # prioritize vertical vicinity
-                    elif dy0 == dy and (dx0:=abs(pos.x-center.x)) < dx: dx, dy, closest = dx0, dy0, c
-                return self._find(closest, pos) if closest else node
+                    dxc = 0 if c.x <= pos.x <= c.x+c.w else min(abs(pos.x-c.x), abs(pos.x-(c.x+c.w)))
+                    dyc = 0 if c.y <= pos.y <= c.y+c.h else min(abs(pos.y-c.y), abs(pos.y-(c.y+c.h)))
+                    if dyc < dy: closest, dx, dy = c, dxc, dyc
+                    elif dyc == dy and dxc < dx: closest, dx = c, dxc
+                return self._find(closest, pos) if closest is not None else node
         return node
 
     # TODO: allow drift
@@ -74,7 +74,9 @@ class Cursor:
         node = self._find(self.frame.children[0], pos, up)
         if node.k is K.LINE:
             if isinstance(pos, int): self.idx, self.pos = pos, vec2(node.xs[pos-node.start], node.y)
-            else: self.idx, self.pos = node.start + node.xs.index(x:=min(node.xs, key=lambda x: abs(x-pos.x))), vec2(x, node.y)
+            else:
+                self.idx = node.start + node.xs.index(x:=min(node.xs, key=lambda x: abs(x-pos.x)))
+                self.pos = vec2(x, node.y)
         else:
             assert isinstance(pos, int)
             node = _find_edit_parent(node, pos)
@@ -84,18 +86,20 @@ class Cursor:
                 self.update(pos, up=up)
             else: raise RuntimeError(f"Could not resolve position {pos} to LINE after enabling edit mode on {node}")
             return
-
+        
+        new_editnodes = set()
         rerender = False
         p1 = _find_edit_parent(node, self.idx)
-        if not _in_edit_view(p1): rerender = p1.edit = True
-        new_editnodes = {p1}
+        if p1.parent.k not in [K.P, K.EMPTY_LINE]: # edit mode changes nothing here, saves some rerenders
+            if not _in_edit_view(p1): rerender = p1.edit = True
+            if p1.edit: new_editnodes.add(p1)
         
         # if cursor between nodes on same line, edit=True on both
         node2 = self._find(self.frame.children[0], self.idx, up=self.idx == node.start)
         p2 = _find_edit_parent(node2, self.idx)
-        if node.y == node2.y:
-            new_editnodes.add(p2)
+        if node.y == node2.y and p2.parent.k not in [K.P, K.EMPTY_LINE]:
             if not _in_edit_view(p2): rerender = p2.edit = True
+            if p2.edit: new_editnodes.add(p2)
 
         for n in self.frame.editnodes:
             if n not in new_editnodes: n.edit = False # If frame in editnodes (everthing rendered in edit view), rerender is never True
@@ -551,7 +555,7 @@ def csspx(pstyle:Dict, style:Dict, k:str) -> float:
     return v[0] if isinstance(v, tuple) and len(v) == 1 else v
 
 SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1800)
-SCENE = Node(K.SCENE, SS, x=0, y=0)
+SCENE = Node(K.SCENE, SS, x=100, y=0)
 SS.children = [SCENE]
 
 glfwInit()
