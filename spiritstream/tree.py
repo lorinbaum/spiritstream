@@ -5,24 +5,24 @@ from spiritstream.helpers import SPACES
 import re
 
 PATTERN = re.compile("|".join([
-    r"^(?P<empty_line>[ \t]*?$)",
+    r"^(?P<empty_line>[\s]*?\n|\Z)",
     r"^(?P<codeblock>```[\s\S]*?\n```|~~~[\s\S]*?\n~~~)",
     r"^ {0,3}(?P<horizontal_rule>\*(?:[ \t]*\*){2,}[ \t]*|_(?:[ \t]*_){2,}[ \t]*|-(?:[ \t]*-){2,}[ \t]*)$",
     r"^(?P<listitem>[ \t]*(?:\d+[\.\)]\s+|[-*+][ \t]+))",
-    r"^(?P<indented_line>(?: {0,3}\t| {4,})[\s\S]*?$)",
+    r"^(?P<indented_line>(?: {0,3}\t| {4,})[\s\S]*?(?:\n|\Z))",
     r"^ {0,3}(?P<heading>#+)[\t ]+",
     r"^ {0,3}(?P<blockquote_line>>+)",
     r"^ {0,3}(?P<paragraph_line>)(?!\s)",
 
-    r"(?P<bolditalic_toggle>(?<![\*\s\\])\*\*\*(?![\*\s])|(?<![_\s\\])___(?![_\s]))", # don't know whether it's start or end
+    r"(?P<bolditalic_toggle>(?<![\*\s\\])\*\*\*(?=[^\*\s])|(?<![_\s\\])___(?=[^_\s]))", # don't know whether it's start or end
     r"(?P<bolditalic_start>(?<!\\)\*\*\*(?=[^\*\s])|(?<!\\)___(?=[^_\s]))",
     r"(?P<bolditalic_end>(?<![\*\s\\])\*\*\*|(?<![_\s\\])___)",
 
-    r"(?P<bold_toggle>(?<![\*\s\\])\*\*(?![\*\s])|(?<![_\s\\])__(?![_\s]))", # don't know whether it's start or end
+    r"(?P<bold_toggle>(?<![\*\s\\])\*\*(?=[^\*\s])|(?<![_\s\\])__(?=[^_\s]))", # don't know whether it's start or end
     r"(?P<bold_start>(?<!\\)\*\*(?=[^\*\s])|(?<!\\)__(?=[^_\s]))",
     r"(?P<bold_end>(?<![\*\s\\])\*\*|(?<![_\s\\])__)",
 
-    r"(?P<italic_toggle>(?<![\*\s\\])\*(?![\*\s])|(?<![_\s\\])_(?![_\s]))", # don't know whether it's start or end
+    r"(?P<italic_toggle>(?<![\*\s\\])\*(?=[^\*\s])|(?<![_\s\\])_(?=[^_\s]))", # don't know whether it's start or end
     r"(?P<italic_start>(?<!\\)\*(?=[^\*\s])|(?<!\\)_(?=[^_\s]))",
     r"(?P<italic_end>(?<![\*\s\\])\*|(?<![_\s\\])_)",
 
@@ -41,7 +41,7 @@ PATTERN = re.compile("|".join([
     r"(?P<closing_parenthesis>(?<!\\)\))",
 
     r"(?P<double_inline_code>(?<![`\\])``(?!`))",
-    r"(?P<inline_code>(?<![`\\])`(?!`))",
+    r"(?P<inline_code>(?<![\\])`(?!`))", # no negative lookbehind for another ` because that would already have matched with double_inline_code
 
     r"(?P<text>[\s\S]+?)"
 ]), re.MULTILINE)
@@ -73,7 +73,7 @@ class K(Enum): # Kind of node
     HR = auto()
     CB = auto() # codeblock
     BLOCKQUOTE = auto()
-    _LIST, UL, OL, LI = auto(), auto(), auto(), auto()
+    UL, OL, LI = auto(), auto(), auto()
     TEXT = auto()
 
 INLINE_NODES = {K.BI, K.B, K.I, K.S, K.A, K.IMG, K.INLINE_CODE, K.DOUBLE_INLINE_CODE, K.TEXT, K.LINE}
@@ -97,7 +97,7 @@ class Node:
     def _format(self, v):
         if isinstance(v, bool): return repr(v)
         elif isinstance(v, (int, float)): return f"{v:.2f}"
-        elif isinstance(v, list): return "[" + ", ".join(f"{i:.2f}" for i in v[:10]) + (", ...]" if len(v) > 10 else "]")
+        elif isinstance(v, list): return "[" + ", ".join(f"{i:.2f}" if isinstance(i, (int, float)) else repr(i) for i in v[:10]) + (", ...]" if len(v) > 10 else "]")
         elif isinstance(v, str): return repr(v[:50] + ("..." if len(v) > 50 else "")) 
         elif isinstance(v, dict): return "dict..."
         else: return repr(v)
@@ -115,12 +115,11 @@ def tokenize(text:str) -> Generator[Token, None, None]:
                         t = m.group("indented_line").replace("\t", " " * SPACES)
                         stripped = t.lstrip(" ")
                         depth = len(t) - len(stripped)
-                        data = (depth, stripped) # depth of indent
+                        data = depth # depth of indent
                     case "codeblock":
                         lines = m.group("codeblock").splitlines()
                         language = lines[0].strip(" `~")
-                        code = lines[1:-1]
-                        data = (language, code)
+                        data = (language, len(lines[0]))
                     case "listitem":
                         stripped = (t:=m.group("listitem")).lstrip("\t ")
                         indent = len(t[:len(t) - len(stripped)].replace("\t", " " * SPACES))
@@ -136,57 +135,63 @@ def tokenize(text:str) -> Generator[Token, None, None]:
                     if text_start is not None: yield Token("text", text_start, m.start()); text_start = None
                     yield Token(name, m.start(), m.end(), data)
     if text_start is not None: yield Token("text", text_start, len(text))
-    yield Token("endoffile", len(text), len(text))
+    yield Token("endoffile", len(text), len(text)+1) # HACK: cursor positioning will look for nodes with start <= idx < end so last node ends 1 beyond
 
 def treeify(tokens:Iterable[Token], head=None) -> Node:
-    node = head = Node(K.BODY, None, []) if head is None else head # node I am currently adding to aka. most recent unclosed node
+    # TODO: BODY start=0 is not guaranteed if the text has a head
+    node = head = Node(K.BODY, None, start=0) if head is None else head # node stores what I am currently adding to aka. most recently unclosed
     for tok in tokens:
         while tok.name in BLOCK_TOKENS and node.k in INLINE_NODES:
             # Open ended links are invalid, so replaced by text nodes (merge with adjacent text nodes if any). Other inline nodes just end.
-            if node.k in LINKS:
+            # HACK: the second condition exists because *a***\n is guaranteed to open a bold node, which is detected here and replaced by text if
+            # it contains nothing but a newline (=TEXT child of length 1)
+            if node.k in LINKS or node.k in INLINE_NODES and len(node.children) == 1 and node.children[0].end - node.children[0].start == 1:
                 # k = K.TEXT and then add_text effectively replaces this with new text node while allowing merging
                 node.k, start, node.end = K.TEXT, node.start, tok.start 
                 add_text((node:=node.parent), start, tok.start)
-            else:
-                if node.k is K.BI:
-                    node.k, node.children = K.B, [Node(K.I, node, node.children, start = node.start + 2, end = tok.start)]
-                    for n in node.children[0].children: n.parent = node.children[0]
-                node.end, node = tok.start, node.parent
+            else: node.end, node = tok.start, node.parent
         if tok.name == "endoffile": node.data.setdefault("end", tok.end)
         match tok.name:
             case "heading": node = start_node(Node(getattr(K, f"H{min(tok.data, 6)}"), head, start = tok.start))
-            case "empty_line": node = start_node(Node(K.EMPTY_LINE, head, start = tok.start))
+            case "empty_line":
+                node = start_node(Node(K.EMPTY_LINE, head, start=tok.start))
+                add_text(node, tok.start, tok.end)
             case "paragraph_line" if node.k is not K.P: node = start_node(Node(K.P, head, start = tok.start))
             case "horizontal_rule": node = start_node(Node(K.HR, head, start = tok.start))
-            case "codeblock": node = start_node(Node(K.CB, head, start = tok.start, language = tok.data[0], code = tok.data[1]))
-            case "indented_line" if tok.data[0] >= 4:
-                if node.k is not K.CB: node = start_node(Node(K.CB, head, start = tok.start, line = [" "*(tok.data[0]-4) + tok.data[1]]))
-                else: node.line.append(" "*(tok.data[0]-4) + tok.data[1])
+            case "codeblock": 
+                node = start_node(Node(K.CB, head, start=tok.start, language=tok.data[0]))
+                add_text(node, tok.start + tok.data[1], tok.end - 3)
+            case "indented_line" if tok.data >= 4:
+                if node.k is not K.CB: node = start_node(Node(K.CB, head, start=tok.start))
+                add_text(node, tok.start + tok.data, tok.end)
             case "blockquote_line":
                 if node.k is not K.BLOCKQUOTE: node = start_node(Node(K.BLOCKQUOTE, head, start = tok.start, depth = 1))
                 while node.depth < tok.data: node = start_node(Node(K.BLOCKQUOTE, node, start = tok.start, depth = node.depth + 1))
                 while node.k is K.BLOCKQUOTE and node.depth > tok.data: node = end_node(node, tok.start)
             case "listitem":
                 newindent, newlisttype, digit = tok.data
-                newindent //= SPACES
-                listnode = node if node.k in [K._LIST, K.UL, K.OL] else node.parent if node.k is K.LI and node.parent and node.parent.k in [K._LIST, K.UL, K.OL] else None
-                if listnode is None: node = listnode = start_node(Node(K._LIST, head, start = tok.start, indent = 0))
-                while (previndent:=listnode.indent) < newindent:
-                    if node.k is not K.LI: node = start_node(Node(K.LI, listnode, start = tok.start))
-                    node = listnode = start_node(Node(K._LIST, node, start = tok.start, indent = previndent + 1))
-                if node is not listnode: node = end_node(node, tok.start)
-                assert node is listnode
-                while (previndent:=listnode.indent) > newindent:
-                    node = end_node(listnode, tok.start)
-                    assert node.k is K.LI
-                    listnode = node = end_node(node, tok.start)
-                if listnode.k is not newlisttype:
-                    if listnode.k is K._LIST: listnode.k = newlisttype
+                listnode = node if node.k in [K.UL, K.OL] else node.parent if node.k is K.LI and node.parent and node.parent.k in [K.UL, K.OL] else None
+                if listnode is None:
+                    if newindent >= 4: # not a list item but an indented line
+                        if node.k is not K.CB: node = start_node(Node(K.CB, head, start = tok.start))
+                        add_text(node, tok.start + newindent, tok.end)
                     else:
+                        node = start_node(Node(newlisttype, head, indent=newindent, start=tok.start))
+                        node = start_node(Node(K.LI, node, start = tok.start, digit = digit))
+                else:
+                    if listnode.indent < newindent:
+                        if node.k is not K.LI: node = start_node(Node(K.LI, listnode, start = tok.start))
+                        node = listnode = start_node(Node(newlisttype, node, start = tok.start, indent = newindent))
+                    if node is not listnode: node = end_node(node, tok.start) # close LI
+                    assert node is listnode
+                    while listnode.indent > newindent:
+                        node = end_node(listnode, tok.start)
+                        assert node.k is K.LI
+                        listnode = node = end_node(node, tok.start)
+                    if listnode.k is not newlisttype:
                         node = end_node(node, tok.start)
                         node = listnode = start_node(Node(newlisttype, node, start = tok.start, indent = newindent))
-                assert node is listnode and node.k is tok.data[1]
-                node = start_node(Node(K.LI, node, start = tok.start, digit = digit))
+                    node = start_node(Node(K.LI, node, start = tok.start, digit = digit))
             
             case "wikilink_embed_start" if node.k not in LINKS: node = start_node(Node(K.IMG, node, start = tok.start, linktype = "wiki"))
             case "wikilink_start" if node.k not in LINKS: node = start_node(Node(K.A, node, start = tok.start, linktype = "wiki"))
@@ -241,13 +246,13 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
 
                     case "bolditalic_start" if node.k not in [K.I, K.B]: node = start_node(Node(K.BI, node, start=tok.start))
                     case "bolditalic_toggle"|"bolditalic_end":
-                        if node.k is K.BI:
-                            node.children = [Node(K.I,node, node.children, start=node.start+2, end=tok.end-2)]
-                            for n in node.children[0].children: n.parent = node.children[0]
-                            node.end, node.k, node = tok.end, K.B, node.parent
+                        if node.k is K.BI: node = end_node(node, tok.end)
+                            # node.children = [Node(K.I,node, node.children, start=node.start+2, end=tok.end-2)]
+                            # for n in node.children[0].children: n.parent = node.children[0]
+                            # node.end, node.k, node = tok.end, K.B, node.parent
                         elif node.k is K.I:
                             node = end_node(node, tok.start+1)
-                            if node.k is K.B: end_node(node, tok.end)
+                            if node.k is K.B: node = end_node(node, tok.end)
                             else: node = start_node(Node(K.B, node, start=tok.start+1))
                         elif node.k is K.B:
                             node = end_node(node, tok.start+2)
@@ -314,14 +319,18 @@ def serialize(head:Node) -> str:
     text = head.text
     prevNode, prevLevel = None, -1
     for node, level in walk(head, level=0):
-        if isinstance(node, Node):
+        if node.k is not K.LINE:
             assert node.k is not K.BI, "bolditalic nodes should be replace by bold and italic nodes during parsing"
-            if node.k is K.TEXT: ret += text[node.start:node.end].replace("\n", "<br>")
+            while prevLevel >= level:
+                ret += htmltag(prevNode, open=False)
+                assert prevNode.parent is not None
+                prevNode, prevLevel = prevNode.parent, prevLevel - 1
+            if node.k is K.TEXT:
+                if node is node.parent.children[-1] and node.parent.k not in [K.EMPTY_LINE, *INLINE_NODES]:
+                    # rstrip minimize excessive <br> tags
+                    ret += text[node.start:node.end].rstrip("\n").replace("\n", "<br>")
+                else: ret += text[node.start:node.end].replace("\n", "<br>")
             else:
-                while prevLevel >= level:
-                    ret += htmltag(prevNode, open=False)
-                    assert prevNode.parent is not None
-                    prevNode, prevLevel = prevNode.parent, prevLevel - 1
                 ret += htmltag(node)
                 prevNode = node
                 prevLevel = level
@@ -336,7 +345,7 @@ def htmltag(node:Node, open=True) -> str:
         case K.FRAME:
             return f"""<html><head><link rel="stylesheet" href="./test/test.css"/><title>{getattr(node, "title", "Unnamed frame")}</title></head>""" \
             if open else "</html>"
-        case K.EMPTY_LINE: return "" # TODO: EMPTY_LINE should not exist?
+        case K.EMPTY_LINE: return ""
         case _: return f"<{'' if open else '/'}{node.k.name.lower()}>"
 
 INTERNAL_LINK_TARGETS = set()

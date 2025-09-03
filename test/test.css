@@ -28,9 +28,15 @@ a:visited {
   color: #d43f58;
 }
 
-blockquote {
+blockquote, cb {
   background-color: #1f1f1f;
   padding: 15px 40px;
+}
+
+cb {
+  display: block;
+  font-size: 85%;
+  color: #fac7a8;
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -51,8 +57,3 @@ ul, ol {
 }
 
 ul { list-style-type: disc; }
-
-code {
-  font-size: 85%;
-  color: #fac7a8;
-}

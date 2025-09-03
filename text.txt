@@ -3,8 +3,6 @@ Occasional stream of my spirits to the collective mind. Anything under the headi
 
 I can be expected to be disagreeable, conscientious, open, relatively stable and slightly introverted.
 
-Some changes are manually documented in changelog, otherwise see GitHub repository.
-
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
@@ -18,18 +16,19 @@ or is he?
 - hamedi2
     - hamedi21
     - hamedi21
-    - hamedi21
-    - hamedi21
-    - hamedi21
-    - hamedi21
-    - hamedi21
+        - deep hamedi
+    1. hamedi1
 
 1. hamedi1
 2. hamedi2
     1. hamedi21
-
+  3. hamedi3
+4. hamedi4
 ---
 
 *hamedi***
 *hamedi* **is** here **a**
 **
+
+    - hamedi
+    is here
