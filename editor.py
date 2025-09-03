@@ -1,5 +1,5 @@
 from pprint import pprint
-import math, time, pickle
+import math, time, pickle, functools
 from enum import Enum, auto
 from typing import Union, List, Dict, Tuple
 from spiritstream.vec import vec2
@@ -242,6 +242,7 @@ def typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, c
 # TODO: select font more carefully. may contain symbols not in font
 # something like g = next((fonŧ[g] for font in fonts if g in font))
 # TODO: line_strings is creating ambiguity, sucks, remove. index into text using line start and end to actually get the text. obviously.
+@functools.cache # TODO custom cache so it can also shift cached lines down
 def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, color:Color, lineheight:float, newline_x:float=None, align="left",
             start=0) -> Tuple[Node, List[float]]:
     """
@@ -253,7 +254,7 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
     linepos = vec2(x, y) # top left corner of line hitbox
     if newline_x is None: newline_x = x
     assert cx <= newline_x + width
-    ret, line_strings = Node(K.TEXT, None), [""]
+    lines, line_strings = Node(K.TEXT, None), [""]
     lstart = 0 # char index where line started
     xs = [] # cursor x positions
     wraps = [] # idx of wraps
@@ -261,7 +262,7 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
     for idx, c in enumerate(text):
         xs.append(cx)
         if c == "\n":
-            ret.children.append(Node(K.LINE, ret, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
+            lines.children.append(Node(K.LINE, lines, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
             cx, linepos, xs, lstart = newline_x, vec2(newline_x, linepos.y + lineheight), [], idx+1
             line_strings.append("")
             continue
@@ -270,14 +271,14 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
             wrap_idx = fwrap + 1 if (fwrap:=line_strings[-1].rfind(" ")) >= 0 else len(line_strings[-1])
             wraps.append(wrap_idx + start + lstart)
             if wrap_idx == len(line_strings[-1]): # no wrapping necessary, just cut off
-                ret.children.append(Node(K.LINE, ret, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start+idx, xs=xs))
+                lines.children.append(Node(K.LINE, lines, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start+idx, xs=xs))
                 cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
                 xs, lstart = [cx], idx
                 line_strings.append("")
             else:
                 line_strings.append(line_strings[-1][wrap_idx:])
                 line_strings[-2] = line_strings[-2][:wrap_idx]
-                ret.children.append(Node(K.LINE, ret, x=linepos.x, y=linepos.y, w=xs[wrap_idx] - linepos.x, h=lineheight, start=start+lstart,
+                lines.children.append(Node(K.LINE, lines, x=linepos.x, y=linepos.y, w=xs[wrap_idx] - linepos.x, h=lineheight, start=start+lstart,
                                 end=start+lstart+wrap_idx, xs=xs[:wrap_idx+1]))
                 xs, lstart = [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]], lstart + wrap_idx
                 cx, linepos = xs[-1], vec2(newline_x, linepos.y + lineheight)
@@ -287,9 +288,9 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
 
     xs.append(cx) # first position after the last character
     if line_strings[-1] != "" or text == "":
-        ret.children.append(Node(K.LINE, ret, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
+        lines.children.append(Node(K.LINE, lines, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
     if align in ["center", "right"]:
-        for c in ret.children:
+        for c in lines.children:
             shift = x+width-c.w-c.x / (2 if align == "center" else 1)
             c.x, c.xs = c.x + shift, [x0 + shift for x0 in c.xs]
 
@@ -297,7 +298,7 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
     ascentpx = SS.fonts[font].engine.hhea.ascent * fontsize / SS.fonts[font].engine.head.unitsPerEM
     descentpx = SS.fonts[font].engine.hhea.descent * fontsize / SS.fonts[font].engine.head.unitsPerEM
     total = ascentpx - descentpx
-    for s, l in zip(line_strings, ret.children):
+    for s, l in zip(line_strings, lines.children):
         for i, c in enumerate(s):
             g = SS.fonts[font].glyph(c, fontsize, 72)
             if c != " ":
@@ -306,7 +307,7 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
                     g.size.x, -g.size.y, # size
                     *(SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, SS.fonts[font].render(c, fontsize, 72))), # uv offset and size
                     color.r, color.g, color.b, color.a] # color 
-    return ret, instance_data, wraps
+    return lines, instance_data, wraps
 
 
 # class Text:
@@ -432,8 +433,26 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
 # def framebuffer_size_callback(window, width, height):
 #     Scene.w, Scene.h, Scene.resized = width, height, True
 
-# @GLFWcharfun
-# def char_callback(window, codepoint): text.write(codepoint)
+@GLFWcharfun
+def char_callback(window, codepoint): write(frame, chr(codepoint))
+
+def erase(frame:Node, right=False):
+    frame.text = frame.text[:max(frame.cursor.idx - (0 if right else 1), 0)] + frame.text[(frame.cursor.idx + (1 if right else 0)):]
+    markdown = parse(frame.text)
+    frame.children = [markdown]
+    markdown.parent = frame
+    populate_render_data(frame, SS.css, reset=True)
+    frame.cursor.update(frame.cursor.idx - (0 if right else 1))
+
+def write(frame:Node, text:str):
+    t0 = time.time()
+    frame.text = frame.text[:frame.cursor.idx] + text + frame.text[frame.cursor.idx:]
+    markdown = parse(frame.text)
+    frame.children = [markdown]
+    markdown.parent = frame
+    populate_render_data(frame, SS.css, reset=True)
+    frame.cursor.update(frame.cursor.idx + len(text))
+    print(f"{time.time() - t0:.3f}")
 
 @GLFWkeyfun
 def key_callback(window, key:int, scancode:int, action:int, mods:int):
@@ -443,9 +462,9 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         elif key == GLFW_KEY_RIGHT: frame.cursor.move("right")
         elif key == GLFW_KEY_UP: frame.cursor.move("up")
         elif key == GLFW_KEY_DOWN: frame.cursor.move("down")
-#         if key == GLFW_KEY_BACKSPACE: text.erase()
-#         if key == GLFW_KEY_DELETE: text.erase(right=True)
-#         if key == GLFW_KEY_ENTER: text.write(ord("\n"))
+        if key == GLFW_KEY_BACKSPACE: erase(frame)
+        if key == GLFW_KEY_DELETE: erase(frame, right=True)
+        if key == GLFW_KEY_ENTER: write(frame, "\n")
 #         if key == GLFW_KEY_S:
 #             if mods & GLFW_MOD_CONTROL: # SAVE
 #                 with open("text.txt", "w") as f: f.write(text.text)
@@ -654,7 +673,7 @@ if CACHE_GLYPHATLAS:
 if not getattr(SS, "glyphAtlas", None): SS.glyphAtlas = TextureAtlas(GL_RED)
 
 # glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
-# glfwSetCharCallback(window, char_callback)
+glfwSetCharCallback(window, char_callback)
 glfwSetKeyCallback(window, key_callback)
 glfwSetMouseButtonCallback(window, mouse_callback)
 # glfwSetCursorPosCallback(window, cursor_pos_callback)
