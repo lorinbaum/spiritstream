@@ -74,6 +74,11 @@ class Cursor:
             else: raise RuntimeError(f"Could not resolve position {pos} to LINE after enabling edit mode on {node}")
             return
 
+        # scroll into view
+        # TODO: render only selection that is visible and watch out for edit mode causing jitter while scrolling.
+        if self.pos.y + SCENE.y < 0: SCENE.y = -self.pos.y
+        elif self.pos.y + SCENE.y > SS.h: SCENE.y = SS.h - self.pos.y - self.node.h
+
         self.node = node
         new_editnodes = set()
         rerender = False
@@ -300,9 +305,8 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
                     color.r, color.g, color.b, color.a] # color 
     return lines, instance_data, wraps
 
-# @GLFWframebuffersizefun
-# def framebuffer_size_callback(window, width, height):
-#     Scene.w, Scene.h, Scene.resized = width, height, True
+@GLFWframebuffersizefun
+def framebuffer_size_callback(window, width, height): SS.w, SS.h, SS.resized = width, height, True
 
 @GLFWcharfun
 def char_callback(window, codepoint): write(frame, chr(codepoint))
@@ -317,7 +321,6 @@ def erase(frame:Node, right=False):
     frame.cursor.update(frame.cursor.idx - (0 if right or frame.cursor.selection else 1))
 
 def write(frame:Node, text:str):
-    t0 = time.time()
     if frame.cursor.selection: frame.text = frame.text[:frame.cursor.selection.start] + text + frame.text[frame.cursor.selection.end:]
     else: frame.text = frame.text[:frame.cursor.idx] + text + frame.text[frame.cursor.idx:]
     markdown = parse(frame.text)
@@ -325,7 +328,6 @@ def write(frame:Node, text:str):
     markdown.parent = frame
     populate_render_data(frame, SS.css, reset=True)
     frame.cursor.update((frame.cursor.selection.start if frame.cursor.selection else frame.cursor.idx) + len(text))
-    print(f"{time.time() - t0:.3f}")
 
 @GLFWkeyfun
 def key_callback(window, key:int, scancode:int, action:int, mods:int):
@@ -338,17 +340,18 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         if key == GLFW_KEY_BACKSPACE: erase(frame)
         if key == GLFW_KEY_DELETE: erase(frame, right=True)
         if key == GLFW_KEY_ENTER: write(frame, "\n")
-#         if key == GLFW_KEY_S:
-#             if mods & GLFW_MOD_CONTROL: # SAVE
-#                 with open("text.txt", "w") as f: f.write(text.text)
+        if key == GLFW_KEY_S:
+            if mods & GLFW_MOD_CONTROL: # SAVE
+                with open(TEXTPATH, "w") as f: f.write(frame.text)
         if key == GLFW_KEY_A and mods & GLFW_MOD_CONTROL:  # select all
             frame.cursor.selection = Selection(0, False, len(frame.text), False)
             frame.cursor.update(len(frame.text), selection=True)
-#         if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and text.selection.instance_count > 0: glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
-#         if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: text.write(glfwGetClipboardString(window).decode()) # paste
-#         if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and text.selection.instance_count > 0: # cut
-#             glfwSetClipboardString(window, text.text[text.selection.start:text.selection.end].encode()) # copy
-#             text.erase()
+        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and frame.cursor.selection:
+            glfwSetClipboardString(window, frame.text[frame.cursor.selection.start:frame.cursor.selection.end].encode()) # copy
+        if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: write(frame, glfwGetClipboardString(window).decode()) # paste
+        if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and frame.cursor.selection: # cut
+            glfwSetClipboardString(window, frame.text[frame.cursor.selection.start:frame.cursor.selection.end].encode()) # copy
+            erase(frame)
         elif key == GLFW_KEY_HOME: frame.cursor.move("start", selection)
         elif key == GLFW_KEY_END: frame.cursor.move("end", selection)
 
@@ -357,8 +360,7 @@ def mouse_callback(window, button:int, action:int, mods:int):
     if button == GLFW_MOUSE_BUTTON_1 and action is GLFW_PRESS:
         x, y = ctypes.c_double(), ctypes.c_double()
         glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-        frame.cursor.update(vec2(x.value - SCENE.x, y.value - SCENE.y), selection=action==GLFW_RELEASE or glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS)
-        # text.goto(vec2(x.value - text.x, y.value + text.y), selection=action == GLFW_RELEASE or glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) # adjust for offset vector
+        frame.cursor.update(vec2(x.value - SCENE.x, y.value - SCENE.y), selection=glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS)
 
 @GLFWcursorposfun
 def cursor_pos_callback(window, x, y):
@@ -367,10 +369,8 @@ def cursor_pos_callback(window, x, y):
         glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
         frame.cursor.update(vec2(x.value - SCENE.x, y.value - SCENE.y), selection=True)
 
-# @GLFWscrollfun
-# def scroll_callback(window, x, y):
-#     Scene.y -= y * 40
-#     Scene.scrolled = True
+@GLFWscrollfun
+def scroll_callback(window, x, y): SCENE.y += y * 40
 
 HERITABLE_STYLES = ["color", "font-family", "font-size", "line-height", "font-weight"]
 
@@ -518,7 +518,7 @@ def csspx(pstyle:Dict, style:Dict, k:str) -> float:
     return v[0] if isinstance(v, tuple) and len(v) == 1 else v
 
 SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1800)
-SCENE = Node(K.SCENE, SS, x=100, y=0)
+SCENE = Node(K.SCENE, SS, x=0, y=0)
 SS.children = [SCENE]
 
 glfwInit()
@@ -539,12 +539,12 @@ if CACHE_GLYPHATLAS:
 # GL_RED because single channel, assign after window creation + assignment else texture settings won't apply
 if not getattr(SS, "glyphAtlas", None): SS.glyphAtlas = TextureAtlas(GL_RED)
 
-# glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
+glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
 glfwSetCharCallback(window, char_callback)
 glfwSetKeyCallback(window, key_callback)
 glfwSetMouseButtonCallback(window, mouse_callback)
 glfwSetCursorPosCallback(window, cursor_pos_callback)
-# glfwSetScrollCallback(window, scroll_callback)
+glfwSetScrollCallback(window, scroll_callback)
 
 def glUnbindBuffers():
     glBindVertexArray(0)
@@ -805,17 +805,17 @@ if "@font-face" in SS.css:
     if (src:=font["src"])["format"] != "truetype": raise NotImplementedError
     SS.fonts[name] = Font(Path(CSSPATH).parent.joinpath(src["url"]).resolve())
 
-t0 = time.time()
+# t0 = time.time()
 populate_render_data(frame, SS.css, reset=True)
-print(f"{time.time() - t0:.3f}")
+# print(f"{time.time() - t0:.3f}")
 
-from spiritstream.tree import serialize
-with open("./out.html", "w") as f: f.write(serialize(frame))
+# from spiritstream.tree import serialize
+# with open("./out.html", "w") as f: f.write(serialize(frame))
 
 frame.cursor = Cursor(frame) # after rendertree so it can find line elements in the tree
 SCENE.children = [frame]
 
-show(SS)
+# show(SS)
 
 # if PRINT_TIMINGS: print(f"{-LASTTIME + (LASTTIME:=time.time()):.3f}: Parse, render text+css")
 
@@ -830,19 +830,20 @@ while not glfwWindowShouldClose(window):
     #     frame_count = 0
     #     last_frame_time = current_time
     #     print(f"FPS: {fps}", end="\r")
-    # if Scene.resized:
-    #     offset_vector = vec2(Scene.x * 2 / Scene.w, Scene.y * 2 / Scene.h) # offset applied to all objects. unit in opengl coordinates
-    #     Scene.resized = False
-    #     glViewport(0, 0, Scene.w, Scene.h)
-    # if Scene.scrolled:
-    #     offset_vector = vec2(Scene.x * 2 / Scene.w, Scene.y * 2 / Scene.h) # offset applied to all objects. unit in opengl coordinates
+    if SS.resized:
+        SCENE.x = max(0, (SS.w - frame.w)/2)
+        SS.resized = False
+        glViewport(0, 0, SS.w, SS.h)
+        populate_render_data(frame, SS.css, reset=True)
+        frame.cursor.update(frame.cursor.idx, up=frame.cursor.idx==frame.cursor.node.end, selection=frame.cursor.selection)
+
+    # if SCENE.scrolled:
     #     if text.selection.instance_count > 0: text.selection.update()
     #     Scene.scrolled = False
     
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-    offset_vector = vec2(SCENE.x * 2 / SS.w, SCENE.y * 2 / SS.h)
-    scale, offset = (2 / SS.w, -2 / SS.h), tuple((vec2(-1, 1) + offset_vector).components())
+    scale, offset = (2 / SS.w, -2 / SS.h), tuple(vec2(-1 + SCENE.x * 2 / SS.w, 1 + SCENE.y * -2 / SS.h).components())
 
     # NOTE: quads are rendered before textured quads because glyphs (textured quads) have transparency.
     QuadBuffer.draw(scale, offset)
