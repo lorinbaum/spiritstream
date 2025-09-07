@@ -1,5 +1,5 @@
 from pprint import pprint
-import math, time, pickle, functools
+import math, time, pickle, functools, json, argparse
 from enum import Enum, auto
 from typing import Union, List, Dict, Tuple
 from spiritstream.vec import vec2
@@ -9,27 +9,36 @@ from spiritstream.font import Font, Glyph
 from dataclasses import dataclass
 from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
-from spiritstream.helpers import PRINT_TIMINGS, CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
+from spiritstream.helpers import CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
 from spiritstream.tree import parse, parseCSS, Node, K, Color, color_from_hex, walk, show, INLINE_NODES, steal_children
 
-if PRINT_TIMINGS: FIRSTTIME = LASTTIME = time.time()
+argparser = argparse.ArgumentParser(description="Spiritstream")
+argparser.add_argument("-f", "--file", type=str, help="Path to file to open")
+args = argparser.parse_args()
 
-TEXTPATH = "text.txt"
-CSSPATH = "test/test.css"
+try:
+    with open(WORKSPACEPATH:=Path(__file__).parent / "cache/workspace.json", "r") as f: data=json.load(f)
+except: data = {}
+if args.file: TEXTPATH, CURSORIDX, CURSORUP, SCENEY = Path(args.file), 0, False, 0
+else:
+    TEXTPATH, CURSORIDX = Path(data.get("textpath", "text.txt")), data.get("cursoridx", 0)
+    CURSORUP, SCENEY = data.get("cursorup", False), data.get("sceney", 0)
+CSSPATH = data.get("csspath", "test/test.css")
+
 FORMATTING_COLOR = color_from_hex(0xaaa)
 CURSOR_COLOR = color_from_hex(0xfff)
 SELECTION_COLOR = color_from_hex(0x423024)
 
 class Cursor:
-    def __init__(self, frame:Node):
+    def __init__(self, frame:Node, idx=0, up=False):
         self.frame = frame # keep reference for cursor_coords and linewraps
-        self.idx = 0
+        self.idx = idx
         self.pos:vec2
         self.x = None
         self.node:Node
         self.selection = Selection()
         
-        self.update(self.idx)
+        self.update(idx, up=up)
 
     def _find(self, node:Node, pos:Union[int, vec2], up:bool=False) -> Node:
         if hasattr(node, "children"):
@@ -187,7 +196,8 @@ class Cursor:
             for l in lineends:
                 if l.y == self.node.y and l.end >= self.idx and (d0:=l.end-self.idx) < d: idx, d = l.end, d0
             if idx is not None:
-                if idx in self.frame.wraps or idx == len(self.frame.text): self.update(idx, selection=selection, up=True)
+                # HACK: if text ends with \n, it would try to get to that index, but there is no cursor x position for it.
+                if idx in self.frame.wraps or idx == len(self.frame.text) and self.frame.text[-1] != "\n": self.update(idx, selection=selection, up=True)
                 else: self.update(idx - 1, selection=selection)
             else: raise RuntimeError
 
@@ -518,7 +528,7 @@ def csspx(pstyle:Dict, style:Dict, k:str) -> float:
     return v[0] if isinstance(v, tuple) and len(v) == 1 else v
 
 SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1800)
-SCENE = Node(K.SCENE, SS, x=0, y=0)
+SCENE = Node(K.SCENE, SS, x=0, y=SCENEY)
 SS.children = [SCENE]
 
 glfwInit()
@@ -775,22 +785,15 @@ class _QuadBuffer:
 
 QuadBuffer = _QuadBuffer()
 
-# fps = None
-# frame_count = 0
-# last_frame_time = time.time()
-
-# if PRINT_TIMINGS: print(f"{-LASTTIME + (LASTTIME:=time.time()):.3f}: Initialization")
-
 texquadShader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/texquad.vert", p.parent / "texquad.frag", ["glyphAtlas", "scale", "offset"])
 texquadShader.setUniform("glyphAtlas", 0, "1i")  # 0 means GL_TEXTURE0)
 quadShader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/quad.vert", p.parent / "quad.frag", ["scale", "offset"])
-
-# if PRINT_TIMINGS: print(f"{-LASTTIME + (LASTTIME:=time.time()):.3f}: Loading shaders")
 
 glEnable(GL_DEPTH_TEST)
 glClearDepth(1)
 glClearColor(0, 0, 0, 1)
 
+TEXTPATH.touch()
 with open(TEXTPATH, "r") as f: markdown = parse(t:=f.read())
 with open(CSSPATH, "r") as f: SS.css = parseCSS(f.read())
 default_css = {"body":{"font-size": (16, "px")}}
@@ -812,24 +815,15 @@ populate_render_data(frame, SS.css, reset=True)
 # from spiritstream.tree import serialize
 # with open("./out.html", "w") as f: f.write(serialize(frame))
 
-frame.cursor = Cursor(frame) # after rendertree so it can find line elements in the tree
+frame.cursor = Cursor(frame, idx=CURSORIDX, up=CURSORUP) # after rendertree so it can find line elements in the tree
 SCENE.children = [frame]
 
 # show(SS)
-
-# if PRINT_TIMINGS: print(f"{-LASTTIME + (LASTTIME:=time.time()):.3f}: Parse, render text+css")
+# print(len(frame.text))
 
 while not glfwWindowShouldClose(window):
     if glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS: glfwSetWindowShouldClose(window, GLFW_TRUE)
-    
-    # FPS
-    # frame_count += 1
-    # current_time = time.time()
-    # if (delta:=current_time - last_frame_time) >= 1.0:
-    #     fps = int((frame_count / delta + 0.5) // 1)
-    #     frame_count = 0
-    #     last_frame_time = current_time
-    #     print(f"FPS: {fps}", end="\r")
+
     if SS.resized:
         SCENE.x = max(0, (SS.w - frame.w)/2)
         SS.resized = False
@@ -837,26 +831,20 @@ while not glfwWindowShouldClose(window):
         populate_render_data(frame, SS.css, reset=True)
         frame.cursor.update(frame.cursor.idx, up=frame.cursor.idx==frame.cursor.node.end, selection=frame.cursor.selection)
 
-    # if SCENE.scrolled:
-    #     if text.selection.instance_count > 0: text.selection.update()
-    #     Scene.scrolled = False
-    
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
     scale, offset = (2 / SS.w, -2 / SS.h), tuple(vec2(-1 + SCENE.x * 2 / SS.w, 1 + SCENE.y * -2 / SS.h).components())
 
-    # NOTE: quads are rendered before textured quads because glyphs (textured quads) have transparency.
     QuadBuffer.draw(scale, offset)
     TexQuadBuffer.draw(scale, offset)
     
     if (error:=glGetError()) != GL_NO_ERROR: print(f"OpenGL Error: {hex(error)}")
 
     glfwSwapBuffers(window)
-    # if PRINT_TIMINGS and LASTTIME is not None:
-    #     print(f"{time.time() - LASTTIME:.3f}: First frame done")
-    #     print(f"{time.time() - FIRSTTIME:.3f}: Total\n------")
-    #     LASTTIME = None
     glfwWaitEvents()
+
+with open(WORKSPACEPATH, "w") as f: json.dump({"textpath": TEXTPATH.as_posix(), "sceney": SCENE.y, "cursoridx":frame.cursor.idx,
+                                               "cursorup": frame.cursor.idx == frame.cursor.node.end}, f)
 
 if SAVE_GLYPHATLAS:
     from spiritstream.image import Image
