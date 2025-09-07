@@ -198,7 +198,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
             case "wikilink_end" if node.k in LINKS:
                 if node.linktype == "wiki":
                     if node.children: node.href = (node.children[0].start, node.children[-1].end)
-                    node = end_node(node, tok.start)
+                    node = end_node(node, tok.end)
                 else: node.linktype = "md switch" # this token can end markdownlinks too. data is used when parsing next token to see if conditions for a full switch are satisfied
             case "markdownlink_embed_start" if node.k not in LINKS: node = start_node(Node(K.IMG, node, start = tok.start, linktype = "md"))
             case "markdownlink_start" if node.k not in LINKS: node = start_node(Node(K.A, node, start = tok.start, linktype = "md"))
@@ -216,7 +216,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
             case "closing_parenthesis" if node.k in LINKS and node.linktype == "md switched":
                 node.href = None if len(node.children) == node.switchidx else (node.children[node.switchidx].start, node.children[-1].end)
                 node.children = node.children[:node.switchidx] # remove children that were part of the link
-                node = end_node(node, tok.start)
+                node = end_node(node, tok.end)
 
             # NOTE: check Node kind because text will match newline at end of empty_line and codeblock which is useless
             case "text" if not (node.k in [K.EMPTY_LINE, K.CB] and tok.end - tok.start == 1): add_text(node, tok.start, tok.end )
