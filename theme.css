@@ -1,11 +1,11 @@
 @font-face {
   font-family: "Fira Code";
-  src: url("../assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf") format("truetype");
+  src: url("./assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf") format("truetype");
 }
 
 @font-face {
   font-family: "Fira Code";
-  src: url("../assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Bold.ttf") format("truetype");
+  src: url("./assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Bold.ttf") format("truetype");
   font-weight: 700;
 }
 
@@ -25,6 +25,11 @@ body {
   width: 500px;
   background-color: black;
   white-space: break-spaces; /* ensures exact rendering in browser, which typically collpases 2+ spaces and trailing spaces.*/
+  font-synthesis: none; /* for WYSIWYG because spiritstream doesn't support font-synthesis yet*/
+}
+
+p.code_language {
+  color: #d43f58;
 }
 
 a {
@@ -35,17 +40,16 @@ a:visited {
   color: #d43f58;
 }
 
-blockquote {
+blockquote, code.block {
   background-color: #1f1f1f;
   padding: 15px 40px;
 }
 
-.block {
+code.block {
   display: block;
-  color: #fac7a8;
 }
 
-code.block {
+code {
   color: #fac7a8;
 }
 

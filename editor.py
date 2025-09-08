@@ -1,16 +1,15 @@
 from pprint import pprint
 import math, time, pickle, functools, json, argparse
-from enum import Enum, auto
 from typing import Union, List, Dict, Tuple
 from spiritstream.vec import vec2
 from spiritstream.bindings.glfw import *
 from spiritstream.bindings.opengl import *
-from spiritstream.font import Font, Glyph
+from spiritstream.font import Font
 from dataclasses import dataclass
 from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
 from spiritstream.helpers import CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
-from spiritstream.tree import parse, parseCSS, Node, K, Color, color_from_hex, walk, show, INLINE_NODES, steal_children
+from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children
 
 argparser = argparse.ArgumentParser(description="Spiritstream")
 argparser.add_argument("-f", "--file", type=str, help="Path to file to open")
@@ -23,7 +22,7 @@ if args.file: TEXTPATH, CURSORIDX, CURSORUP, SCENEY = Path(args.file), 0, False,
 else:
     TEXTPATH, CURSORIDX = Path(data.get("textpath", "text.txt")), data.get("cursoridx", 0)
     CURSORUP, SCENEY = data.get("cursorup", False), data.get("sceney", 0)
-CSSPATH = data.get("csspath", "test/test.css")
+CSSPATH = data.get("csspath", "theme.css")
 
 FORMATTING_COLOR = color_from_hex(0xaaa)
 CURSOR_COLOR = color_from_hex(0xfff)
@@ -45,7 +44,7 @@ class Cursor:
             if isinstance(pos, int):
                 for c in node.children:
                     if c.start <= pos and ((pos <= c.end and up) or (not up and pos < c.end)): return self._find(c, pos, up)
-                return node if up else self._find(node, pos, True) # try up before giving up
+                return node if up  or not node.children else self._find(node, pos, True) # try up before giving up
             else:
                 closest, dx, dy = None, math.inf, math.inf
                 for c in node.children:
@@ -83,12 +82,13 @@ class Cursor:
             else: raise RuntimeError(f"Could not resolve position {pos} to LINE after enabling edit mode on {node}")
             return
 
+        self.node = node
+
         # scroll into view
         # TODO: render only selection that is visible and watch out for edit mode causing jitter while scrolling.
         if self.pos.y + SCENE.y < 0: SCENE.y = -self.pos.y
-        elif self.pos.y + SCENE.y > SS.h: SCENE.y = SS.h - self.pos.y - self.node.h
+        elif self.pos.y + SCENE.y + self.node.h > SS.h: SCENE.y = SS.h - self.pos.y - self.node.h
 
-        self.node = node
         new_editnodes = set()
         rerender = False
         if selection and self.idx != self.selection.i0:
@@ -98,19 +98,19 @@ class Cursor:
                       and (n.start < self.selection.end if self.selection.endup else n.start <= self.selection.end)]
             for l in selected_lines:
                 p = _find_edit_parent(l, l.start)
-                if not _in_edit_view(p) and p.parent.k not in [K.P, K.EMPTY_LINE]: rerender = p.edit = True
+                if not _in_edit_view(p) and p.parent.k not in [K.EMPTY_LINE]: rerender = p.edit = True
                 if p.edit: new_editnodes.add(p)
         else:
             self.selection.reset()
             QuadBuffer.replace([], "selection")
         p1 = _find_edit_parent(node, self.idx)
-        if p1.parent.k not in [K.P, K.EMPTY_LINE]: # edit mode changes nothing here, save some rerenders
+        if p1.parent.k not in [K.EMPTY_LINE]: # edit mode changes nothing here, save some rerenders
             if not _in_edit_view(p1): rerender = p1.edit = True
             if p1.edit: new_editnodes.add(p1)
         # if cursor between nodes on same line, edit=True on both
         node2 = self._find(self.frame.children[0], self.idx, up=self.idx == node.start)
         p2 = _find_edit_parent(node2, self.idx)
-        if node.y == node2.y and p2.parent.k not in [K.P, K.EMPTY_LINE]:
+        if node.y == node2.y and p2.parent.k not in [K.EMPTY_LINE]:
             if not _in_edit_view(p2): rerender = p2.edit = True
             if p2.edit: new_editnodes.add(p2)
 
@@ -212,11 +212,7 @@ def _find_edit_parent(node:Node, idx:int) -> Node:
         else: 
             start = node.parent.start <= idx < node.parent.children[0].start
             return next((n for n in (node.parent.children if start else reversed(node.parent.children)) if n.k is K.TEXT))
-    else:
-        assert node.children, node
-        if node.start <= idx < node.children[0].start: return next((n for n in node.children if n.k is K.TEXT))
-        elif node.children[-1].end < idx <= node.end: return next((n for n in reversed(node.children) if n.k is K.TEXT))
-    raise NotImplementedError
+    else: return next((n for n in node.children if n.k is K.TEXT)) # return any text child since any will turn on edit mode for the whole parent
 
 @dataclass
 class Selection:
@@ -237,9 +233,9 @@ class Selection:
     def reset(self): self.i0 = self.up0 = self.i1 = self.up1 = None
     def __bool__(self): return all((i is not None for i in (self.i0, self.up0, self.i1, self.up1)))
 
-def typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, color:Color, lineheight:float, newline_x:float=None, align="left",
+def typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left",
             start=0) -> Tuple[Node, List[float]]:
-    lines, idata, wraps = _typeset(text, x, y, width, font, fontsize, color, lineheight, newline_x, align, start)
+    lines, idata, wraps = _typeset(text, x, y, width, fontfamily, fontsize, fontweight, color, lineheight, newline_x, align, start)
     TexQuadBuffer.add(idata)
     frame.wraps.extend(wraps)
     return lines
@@ -248,13 +244,14 @@ def typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, c
 # something like g = next((fonŧ[g] for font in fonts if g in font))
 # TODO: line_strings is creating ambiguity, sucks, remove. index into text using line start and end to actually get the text. obviously.
 @functools.cache # TODO custom cache so it can also shift cached lines down
-def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, color:Color, lineheight:float, newline_x:float=None, align="left",
-            start=0) -> Tuple[Node, List[float]]:
+def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left",
+             start=0) -> Tuple[Node, List[float]]:
     """
     Returns
     - Node with LINE children to add to the node tree
     - Tex quad instance data for all glyphs
     """
+    font, fontweight = get_font(fontfamily, fontweight) # replace fontweight value with actual used based on what's available
     cx = x # character x offset
     linepos = vec2(x, y) # top left corner of line hitbox
     if newline_x is None: newline_x = x
@@ -271,7 +268,7 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
             cx, linepos, xs, lstart = newline_x, vec2(newline_x, linepos.y + lineheight), [], idx+1
             line_strings.append("")
             continue
-        g = SS.fonts[font].glyph(c, fontsize, 72) # NOTE: dpi is 72 so the font renderer does no further scaling. It uses 72 dpi baseline.
+        g = font.glyph(c, fontsize, 72) # NOTE: dpi is 72 so the font renderer does no further scaling. It uses 72 dpi baseline.
         if cx + g.advance > newline_x + width:
             wrap_idx = fwrap + 1 if (fwrap:=line_strings[-1].rfind(" ")) >= 0 else len(line_strings[-1])
             wraps.append(wrap_idx + start + lstart)
@@ -300,18 +297,18 @@ def _typeset(text:str, x:float, y:float, width:float, font:str, fontsize:float, 
             c.x, c.xs = c.x + shift, [x0 + shift for x0 in c.xs]
 
     instance_data = []
-    ascentpx = SS.fonts[font].engine.hhea.ascent * fontsize / SS.fonts[font].engine.head.unitsPerEM
-    descentpx = SS.fonts[font].engine.hhea.descent * fontsize / SS.fonts[font].engine.head.unitsPerEM
+    ascentpx = font.engine.hhea.ascent * fontsize / font.engine.head.unitsPerEM
+    descentpx = font.engine.hhea.descent * fontsize / font.engine.head.unitsPerEM
     total = ascentpx - descentpx
     for s, l in zip(line_strings, lines.children):
         for i, c in enumerate(s):
-            g = SS.fonts[font].glyph(c, fontsize, 72)
+            g = font.glyph(c, fontsize, 72)
             if c != " ":
-                # TODO: font could be named the same in css but refer to a different file. use font name from file here, not css
-                key = f"{font}_{ord(c)}_{fontsize}"
+                # TODO: font could be named the same in css but refer to a different file. use font name from file here, not css font family
+                key = f"{ord(c)}_{fontfamily}_{fontsize}_{fontweight}"
                 instance_data += [l.xs[i] + g.bearing.x, l.y + ascentpx + (lineheight - total)/2 + (g.size.y - g.bearing.y), 0.5, # pos
                     g.size.x, -g.size.y, # size
-                    *(SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, SS.fonts[font].render(c, fontsize, 72))), # uv offset and size
+                    *(SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, font.render(c, fontsize, 72))), # uv offset and size
                     color.r, color.g, color.b, color.a] # color 
     return lines, instance_data, wraps
 
@@ -328,6 +325,8 @@ def erase(frame:Node, right=False):
     frame.children = [markdown]
     markdown.parent = frame
     populate_render_data(frame, SS.css, reset=True)
+
+    show(frame)
     frame.cursor.update(frame.cursor.idx - (0 if right or frame.cursor.selection else 1))
 
 def write(frame:Node, text:str):
@@ -382,7 +381,16 @@ def cursor_pos_callback(window, x, y):
 @GLFWscrollfun
 def scroll_callback(window, x, y): SCENE.y += y * 40
 
-HERITABLE_STYLES = ["color", "font-family", "font-size", "line-height", "font-weight"]
+HERITABLE_STYLES = ["color", "font-family", "font-size", "line-height", "font-weight", "text-transform"]
+
+def pseudoclass(node:Node, pseudocl:str) -> bool: return False # TODO
+
+def selector_match(sel:Selector, node:Node) -> bool: return all((
+    sel.k is node.k,
+    (all((i in node.cls if node.cls else [] for i in sel.cls))) if sel.cls else True,
+    (all((i in node.ids if node.ids else [] for i in sel.ids))) if sel.ids else True,
+    (all((pseudoclass(node, i) for i in sel.pseudocls))) if sel.pseudocls else True,
+))
 
 def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=None, reset:bool=False) -> Tuple[vec2, vec2, vec2]:
     """
@@ -416,8 +424,8 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
     for k, v in {"_block": vec2(0, 0), "_inline": vec2(0, 0), "_margin": vec2(0, 0), "_width": 0.0}.items(): pstyle.setdefault(k, v)
     assert all([isinstance(v, vec2) for v in [pstyle["_block"], pstyle["_inline"], pstyle["_margin"]]]) and isinstance(pstyle["_width"], float)
     style = {k:v for k, v in pstyle.items() if k in HERITABLE_STYLES}
-    style.update({k:v for sel, rules in css_rules.items() for k, v in rules.items() if sel == "*"})
-    style.update({k:v for sel, rules in css_rules.items() for k, v in rules.items() if sel == node.k.name.lower()}) # TODO: sel like p code
+    style.update({k:v for sel, rules in css_rules.items() for k, v in rules.items() if sel.k is K.ANY})
+    style.update({k:v for sel, rules in css_rules.items() for k, v in rules.items() if selector_match(sel, node)}) # TODO: sel like p code
     style.update({k:csspx(pstyle, style, k) for k in ["width", "font-size"] if k in style}) # update first, other relative units need them
     for_children = {k:v for k,v in style.items() if k in HERITABLE_STYLES} # pass on before more conversion so relative values are recomputed
     style = {k:csspx(pstyle, style, k) for k in style.keys()} # convert px, em, %, auto to device pixels
@@ -441,17 +449,28 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
         node.x, node.y = style["_inline"].x, style["_inline"].y
         if node.k is K.TEXT:
             y = node.y
+            if node.parent.k is K.HR and not edit_view: QuadBuffer.add([node.x, node.y, 0.6, style["_width"], 1, (c:=style["color"]).r, c.g, c.b, c.a])
             if node.parent.k is K.LI and not edit_view:
                 if node.parent.parent.k is K.UL:
                     y = node.y + style["font-size"] * 0.066666 # hack to approximate browser rendering. Shift without changing node.y for talled node.
                     typeset("•", node.x - 1.25 * style["font-size"], y, style["font-size"], style["font-family"], style["font-size"]*1.4,
-                            style["color"], style["line-height"]*1.075, align="right", start=node.start)
+                            style["font-weight"], style["color"], style["line-height"]*1.075, align="right", start=node.start)
                 elif node.parent.parent.k is K.OL:
                     typeset(d:=f"{node.parent.digit}.", node.x-(len(d)+0.5)*style["font-size"], y, style["font-size"]*len(d), style["font-family"],
-                            style["font-size"]*1.05, style["color"], style["line-height"]*1.075, align="right", start=node.start)
+                            style["font-size"]*1.05, style["font-weight"], style["color"], style["line-height"]*1.075, align="right", start=node.start)
             t = text[node.start:node.end].upper() if style.get("text-transform") == "uppercase" else text[node.start:node.end]
-            lines = typeset(t, node.x, y, style["_width"], style["font-family"], style["font-size"], style["color"], style["line-height"],
+            lines = typeset(t, node.x, y, style["_width"], style["font-family"], style["font-size"], style["font-weight"], style["color"], style["line-height"],
                             pstyle["_block"].x, start=node.start)
+            if node.parent.k is K.A:
+                    font = get_font(style["font-family"], style["font-weight"])
+                    ascentpx = font.engine.hhea.ascent * style["font-size"] / font.engine.head.unitsPerEM
+                    descentpx = font.engine.hhea.descent * style["font-size"] / font.engine.head.unitsPerEM
+                    total = ascentpx - descentpx
+                    for l in lines.children:
+                        underline_pos = font.engine.fupx(font.engine.post.underlinePosition)
+                        underline_y = l.y + ascentpx + (style["line-height"] - total)/2 - underline_pos
+                        h = max(1, font.engine.fupx(font.engine.post.underlineThickness))
+                        QuadBuffer.add([l.x, underline_y, 0.6, l.w, h, (c:=style["color"]).r, c.g, c.b, c.a])
             steal_children(lines, node)
             c = node.children[-1]
             style["_block"] = vec2(pstyle["_block"].x, c.y + c.h)
@@ -472,7 +491,7 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
                 if start is not None:
                     if child.k not in INLINE_NODES: style["_inline"].x = pstyle["_block"].x
                     lines = typeset(text[start:end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
-                                    style["font-size"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=start)
+                                    style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=start)
                     edit_view_lines.append((i, lines.children))
                     for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
                     for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
@@ -482,7 +501,7 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
             if child.k is K.LINE: print(child)
             if i == len(node.children) - 1 and child_edit_view and child.end != node.end:
                 lines = typeset(text[child.end:node.end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
-                                style["font-size"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=child.end)
+                                style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=child.end)
                 edit_view_lines.append((i+1, lines.children))
                 for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
                 for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
@@ -513,6 +532,13 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
             node.w = node.h = 0
             style["_block"] = pstyle["_block"]
         return style["_block"], style["_inline"], style["_margin"]
+
+def get_font(fontfamily:str, fontweight:int) -> Font:
+    ret, d, w = None, math.inf, None
+    for font in SS.fonts:
+        if font["font-family"] == fontfamily and (d0:=abs((w0:=font.get("font-weight", 400))-fontweight)) < d: ret, d, w = font["Font"], d0, w0
+    assert ret is not None
+    return ret, w
 
 def csspx(pstyle:Dict, style:Dict, k:str) -> float:
     """Converts CSS values based on unit. CSS assumes 96 DPI for px and EM are relative to font-size"""
@@ -795,31 +821,32 @@ glClearColor(0, 0, 0, 1)
 
 TEXTPATH.touch()
 with open(TEXTPATH, "r") as f: markdown = parse(t:=f.read())
-with open(CSSPATH, "r") as f: SS.css = parseCSS(f.read())
-default_css = {"body":{"font-size": (16, "px")}}
+with open(CSSPATH, "r") as f: SS.css, SS.fonts = parseCSS(f.read())
+default_css = {
+    Selector(K.BODY):{"font-size": (16, "px"), "font-weight": 400},
+    Selector(K.B):{"font-weight": 700}
+}
 for rule, declarations in default_css.items():
     for k,v in declarations.items(): SS.css.setdefault(rule, declarations).setdefault(k, v)
 frame = Node(K.FRAME, SCENE, [markdown], text=t, editnodes=set(), wraps=[], edit=False)
 markdown.parent = frame
 
-# load fonts. TODO: multiple @font-face not supported. also, should probably load dynamically when used :(
-if "@font-face" in SS.css:
-    name = (font:=SS.css["@font-face"])["font-family"]
-    if (src:=font["src"])["format"] != "truetype": raise NotImplementedError
-    SS.fonts[name] = Font(Path(CSSPATH).parent.joinpath(src["url"]).resolve())
+# TODO: load dynamically when used
+for font in SS.fonts:
+    assert font["format"] == "truetype"
+    font["Font"] = Font(Path(CSSPATH).parent.joinpath(font["url"]).resolve())
 
 # t0 = time.time()
 populate_render_data(frame, SS.css, reset=True)
 # print(f"{time.time() - t0:.3f}")
 
-# from spiritstream.tree import serialize
-# with open("./out.html", "w") as f: f.write(serialize(frame))
+from spiritstream.tree import serialize
+with open("./out.html", "w") as f: f.write(serialize(frame, CSSPATH))
 
 frame.cursor = Cursor(frame, idx=CURSORIDX, up=CURSORUP) # after rendertree so it can find line elements in the tree
 SCENE.children = [frame]
 
 # show(SS)
-# print(len(frame.text))
 
 while not glfwWindowShouldClose(window):
     if glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS: glfwSetWindowShouldClose(window, GLFW_TRUE)

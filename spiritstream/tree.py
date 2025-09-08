@@ -6,7 +6,7 @@ import re
 
 PATTERN = re.compile("|".join([
     r"^(?P<empty_line>[\s]*?\n|\Z)",
-    r"^(?P<codeblock>```[\s\S]*?\n```|~~~[\s\S]*?\n~~~)",
+    r"^(?P<codeblock>```[\s\S]*?\n```\n|~~~[\s\S]*?\n~~~\n)",
     r"^ {0,3}(?P<horizontal_rule>\*(?:[ \t]*\*){2,}[ \t]*|_(?:[ \t]*_){2,}[ \t]*|-(?:[ \t]*-){2,}[ \t]*)$",
     r"^(?P<listitem>[ \t]*(?:\d+[\.\)]\s+|[-*+][ \t]+))",
     r"^(?P<indented_line>(?: {0,3}\t| {4,})[\s\S]*?(?:\n|\Z))",
@@ -63,20 +63,21 @@ class K(Enum): # Kind of node
     FRAME = auto()
     LINE = auto()
 
+    ANY = auto() # used for CSS selectors
+
     BODY = auto()
     H1, H2, H3, H4, H5, H6 = auto(), auto(), auto(), auto(), auto(), auto()
     BI, B, I, S = auto(), auto(), auto(), auto() # BI = BOLD+ITALIC
     A, IMG = auto(), auto()
-    INLINE_CODE, DOUBLE_INLINE_CODE = auto(), auto()
+    CODE = auto()
     EMPTY_LINE = auto()
     P = auto()
     HR = auto()
-    CB = auto() # codeblock
     BLOCKQUOTE = auto()
     UL, OL, LI = auto(), auto(), auto()
     TEXT = auto()
 
-INLINE_NODES = {K.BI, K.B, K.I, K.S, K.A, K.IMG, K.INLINE_CODE, K.DOUBLE_INLINE_CODE, K.TEXT, K.LINE}
+INLINE_NODES = {K.BI, K.B, K.I, K.S, K.A, K.IMG, K.CODE, K.TEXT, K.LINE}
 LINKS = {K.A, K.IMG}
 
 class Node:
@@ -147,22 +148,32 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
             # it contains nothing but a newline (=TEXT child of length 1)
             if node.k in LINKS or node.k in INLINE_NODES and len(node.children) == 1 and node.children[0].end - node.children[0].start == 1:
                 # k = K.TEXT and then add_text effectively replaces this with new text node while allowing merging
-                node.k, start, node.end = K.TEXT, node.start, tok.start 
+                node.k, start, node.end = K.TEXT, node.start, tok.start
                 add_text((node:=node.parent), start, tok.start)
             else: node.end, node = tok.start, node.parent
-        if tok.name == "endoffile": node.data.setdefault("end", tok.end)
         match tok.name:
+            case "endoffile":
+                node.data.setdefault("end", tok.end)
+                if node is not head and not node.children: add_text(node, tok.start, tok.end)
             case "heading": node = start_node(Node(getattr(K, f"H{min(tok.data, 6)}"), head, start = tok.start))
             case "empty_line":
                 node = start_node(Node(K.EMPTY_LINE, head, start=tok.start))
                 add_text(node, tok.start, tok.end)
-            case "paragraph_line" if node.k is not K.P: node = start_node(Node(K.P, head, start = tok.start))
+            case "paragraph_line" if node.k is not K.P:
+                node = start_node(Node(K.P, head, start = tok.start))
+                add_text(node, tok.start, tok.end) # add any indent captured in the paragraph line token
             case "horizontal_rule": node = start_node(Node(K.HR, head, start = tok.start))
             case "codeblock": 
-                node = start_node(Node(K.CB, head, start=tok.start, language=tok.data[0]))
-                add_text(node, tok.start + tok.data[1], tok.end - 3)
+                node = start_node(Node(K.CODE, head, start=tok.start, end=tok.end, language=tok.data[0], cls=["block"]))
+                codeblock = node
+                node = start_node(Node(K.P, node, start=tok.start, end=tok.start+tok.data[1]+1, cls=["code_language"]))
+                add_text(node, tok.start+3, tok.start+tok.data[1] + 1) # \n
+                add_text(codeblock, tok.start + tok.data[1]+1, tok.end - 4)
+                node = start_node(Node(K.P, codeblock, start=tok.end-4, end=tok.end))
+                add_text(node, tok.end-1, tok.end)
+                node = head # prevent merging with following blocks
             case "indented_line" if tok.data >= 4:
-                if node.k is not K.CB: node = start_node(Node(K.CB, head, start=tok.start))
+                if not (node.k is K.CODE and "block" in node.cls): node = start_node(Node(K.CODE, head, start=tok.start, cls=["block"]))
                 add_text(node, tok.start + tok.data, tok.end)
             case "blockquote_line":
                 if node.k is not K.BLOCKQUOTE: node = start_node(Node(K.BLOCKQUOTE, head, start = tok.start, depth = 1))
@@ -173,7 +184,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                 listnode = node if node.k in [K.UL, K.OL] else node.parent if node.k is K.LI and node.parent and node.parent.k in [K.UL, K.OL] else None
                 if listnode is None:
                     if newindent >= 4: # not a list item but an indented line
-                        if node.k is not K.CB: node = start_node(Node(K.CB, head, start = tok.start))
+                        if not (node.k is K.CODE and "block" in node.cls): node = start_node(Node(K.CODE, head, start = tok.start, cls=["block"]))
                         add_text(node, tok.start + newindent, tok.end)
                     else:
                         node = start_node(Node(newlisttype, head, indent=newindent, start=tok.start))
@@ -219,7 +230,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                 node = end_node(node, tok.end)
 
             # NOTE: check Node kind because text will match newline at end of empty_line and codeblock which is useless
-            case "text" if not (node.k in [K.EMPTY_LINE, K.CB] and tok.end - tok.start == 1): add_text(node, tok.start, tok.end )
+            case "text" if not (node.k in [K.EMPTY_LINE, K.CODE] and tok.end - tok.start == 1): add_text(node, tok.start, tok.end )
 
             case _ if node.k not in LINKS or node.linktype == "md": # inline formatting only allowed outside of links except in the label part of a markdown link                
                 match tok.name:
@@ -247,9 +258,6 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                     case "bolditalic_start" if node.k not in [K.I, K.B]: node = start_node(Node(K.BI, node, start=tok.start))
                     case "bolditalic_toggle"|"bolditalic_end":
                         if node.k is K.BI: node = end_node(node, tok.end)
-                            # node.children = [Node(K.I,node, node.children, start=node.start+2, end=tok.end-2)]
-                            # for n in node.children[0].children: n.parent = node.children[0]
-                            # node.end, node.k, node = tok.end, K.B, node.parent
                         elif node.k is K.I:
                             node = end_node(node, tok.start+1)
                             if node.k is K.B: node = end_node(node, tok.end)
@@ -268,15 +276,16 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                         else: add_text(node, tok.start, tok.end) # strikethrough end but not in strikethrough. replace with text
 
                     case "double_inline_code":
-                        if node.k is K.DOUBLE_INLINE_CODE: node = end_node(node, tok.start)
-                        elif node.k is K.INLINE_CODE:
+                        if node.k is K.CODE and node.type == "double": node = end_node(node, tok.end)
+                        elif node.k is K.CODE and node.type == "single":
                             node = end_node(node, tok.start)
-                            node = start_node(Node(K.INLINE_CODE, node, start=tok.start + 1))
-                        else: node = start_node(Node(K.DOUBLE_INLINE_CODE, node, start=tok.start))
+                            # HACK: assigning cls needed because using '"block" in node.cls' to check elsewhere, so expects list
+                            node = start_node(Node(K.CODE, node, start=tok.start + 1, type="single", cls=[])) 
+                        else: node = start_node(Node(K.CODE, node, start=tok.start, type="double", cls=[]))
 
-                    case "inline_code":
-                        if node.k is K.INLINE_CODE: node = end_node(node, tok.start)
-                        elif node.k is not K.DOUBLE_INLINE_CODE: node = start_node(Node(K.INLINE_CODE, node, start=tok.start))
+                    case "inline_code" if not (node.k is K.CODE and node.type == "double"):
+                        if node.k is K.CODE and node.type == "single": node = end_node(node, tok.end)
+                        elif node.k is not K.CODE: node = start_node(Node(K.CODE, node, start=tok.start, type="single", cls=[]))
                     case _: add_text(node, tok.start, tok.end) # no valid match means it should be treated as text
             case _: add_text(node, tok.start, tok.end) # no valid match means it should be treated as text
     for n in reversed(list(walk(head))): # add missing ends. They exist because block nodes add themselves to head without closing previous nodes
@@ -312,51 +321,40 @@ def show(node): [print(f"{' '*SPACES*l}{n}") for n,l in walk(node, level=0)]
 def find(node, **kwargs) -> Node: return next((n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))))
 def find_all(node, **kwargs) -> List[Node]: return [n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))]
 
-def serialize(head:Node) -> str:
+def serialize(head:Node, csspath:str) -> str:
     """node tree to html"""
-    ret = f"<!DOCTYPE html>"
+    ret = f"""<!DOCTYPE html><html><head><link rel="stylesheet" href="{csspath}"/><title>{head.title if head.title else "Unnamed frame"}</title></head>"""
     assert head.k is K.FRAME
     text = head.text
     prevNode, prevLevel = None, -1
     for node, level in walk(head, level=0):
-        if node.k is not K.LINE:
+        if node.k not in [K.LINE, K.FRAME]:
             assert node.k is not K.BI, "bolditalic nodes should be replace by bold and italic nodes during parsing"
             while prevLevel >= level:
-                ret += htmltag(prevNode, open=False)
+                ret += htmltag(prevNode, text, open=False)
                 assert prevNode.parent is not None
                 prevNode, prevLevel = prevNode.parent, prevLevel - 1
             if node.k is K.TEXT:
-                if node is node.parent.children[-1] and node.parent.k not in [K.EMPTY_LINE, *INLINE_NODES]:
-                    # rstrip minimize excessive <br> tags
+                if node is node.parent.children[-1] and node.parent.k not in INLINE_NODES and text[node.start:node.end] != "\n":
+                    # rstrip reduce excessive <br> tags
                     ret += text[node.start:node.end].rstrip("\n").replace("\n", "<br>")
                 else: ret += text[node.start:node.end].replace("\n", "<br>")
             else:
-                ret += htmltag(node)
+                ret += htmltag(node, text)
                 prevNode = node
                 prevLevel = level
     while prevNode is not head:
-        ret += htmltag(prevNode, open=False)
+        ret += htmltag(prevNode, text, open=False)
         prevNode = prevNode.parent
-    return ret + htmltag(head, open=False)
+    return ret + "</html>"
 
-def htmltag(node:Node, open=True) -> str:
+def htmltag(node:Node, text, open=True) -> str:
     # TODO: other special kinds, like links, codeblocks, inline code
     match node.k:
-        case K.FRAME:
-            return f"""<html><head><link rel="stylesheet" href="./test/test.css"/><title>{getattr(node, "title", "Unnamed frame")}</title></head>""" \
-            if open else "</html>"
         case K.EMPTY_LINE: return ""
-        case _: return f"<{'' if open else '/'}{node.k.name.lower()}>"
-
-INTERNAL_LINK_TARGETS = set()
-def href(node:Node, text:str) -> str:
-    assert node.name in ["link", "embed"] and node.data in ["wiki", "md switched"]
-    assert (n:=node.children[0]) if node.data == "wiki" else (n:=node.children[1]).name == "text"
-    if (t:=text[n.start:n.end]).startswith("#"):
-        assert node.name != "embed", "embeding headings not supported yet"
-        INTERNAL_LINK_TARGETS.add(t:=t[1:])
-    return t
-
+        case K.A: return f"<a href=\"{text[node.href[0]:node.href[1]]}\">" if open else "</a>"
+        case K.HR: return "<hr>" if open else ""
+        case _: return f"""<{'' if open else '/'}{node.k.name.lower()}{' class="' + ' '.join(node.cls) + '"' if node.cls else ''}>"""
 
 CSS_PATTERN = re.compile("|".join([
     r"(?P<comment>/\*.*?\*/)",
@@ -371,6 +369,7 @@ CSS_PATTERN = re.compile("|".join([
     r"(?P<close_bracket>\])",
     r"(?P<open_curly>\{)",
     r"(?P<close_curly>\})",
+    r"(?P<dot>\.)",
     r"(?P<comma>,)",
     r"(?P<colon>:)",
     r"(?P<semicolon>;)",
@@ -401,6 +400,7 @@ class Status(Enum):
     PSEUDOCLASS = auto() # awaiting pseudo class name
     CLOSED = auto()
     NAMED = auto() # property name is already set, awaiting value
+    DOT = auto() # after identity, awaiting class name
 
 def tokenizeCSS(text:str):
     head = CSSNode(CSS.STYLESHEET, None, [])
@@ -410,18 +410,19 @@ def tokenizeCSS(text:str):
             if value is not None:
                 match name:
                     case "identity":
-                        if node.name is CSS.STYLESHEET: node = start_node(CSSNode(CSS.RULE,  node, [], (value,)))
+                        if node.name is CSS.STYLESHEET: node = start_node(CSSNode(CSS.RULE, node, [], [value]))
                         elif node.name is CSS.RULE:
                             status = getattr(node, "status", None)
                             if status is Status.PSEUDOCLASS:
                                 node.data = (*node.data[:-1], node.data[-1]+":" + value)
                                 node.status = None
-                            elif status is Status.OPENED: node = start_node(CSSNode(CSS.DECLARATION,  node, [], (value,)))
+                            elif status is Status.OPENED: node = start_node(CSSNode(CSS.DECLARATION, node, [], (value,)))
                             elif status is Status.COMMA:
                                 node.data += (value,)
                                 node.status = None
-                            else: raise NotImplementedError(node.name, status)
-                        elif node.name is CSS.DECLARATION: node = start_node(CSSNode(CSS.IDENTITY,  node, [], (value,)))
+                            elif status is Status.DOT: node.data[-1] += f".{value}"
+                            else: raise NotImplementedError(node.name, status, value)
+                        elif node.name is CSS.DECLARATION: node = start_node(CSSNode(CSS.IDENTITY, node, [], (value,)))
                         else: raise NotImplementedError(node.name)
                     case "at":
                         assert node.name is CSS.STYLESHEET
@@ -442,6 +443,10 @@ def tokenizeCSS(text:str):
                             node.status = Status.CLOSED
                             node = node.parent
                         assert node.name is CSS.STYLESHEET
+                    case "dot":
+                        if node.name is CSS.RULE: node.status = Status.DOT
+                        elif node.name is CSS.STYLESHEET: node = start_node(CSSNode(CSS.RULE, node, [], [""], status=Status.DOT))
+                        else: raise NotImplementedError
                     case "comma":
                         assert node.name is CSS.RULE and getattr(node, "status", None) is None
                         node.status = Status.COMMA
@@ -478,7 +483,7 @@ def tokenizeCSS(text:str):
                         assert node.name is CSS.DECLARATION and node.status is Status.NAMED
                         node.data += (value,)
                     case "delimiter":
-                        if node.name is CSS.STYLESHEET and value == "*": node = start_node(CSSNode(CSS.RULE,  node, [], (value,)))
+                        if node.name is CSS.STYLESHEET and value == "*": node = start_node(CSSNode(CSS.RULE, node, [], (value,)))
                         else: raise NotImplementedError
     while node.name is not CSS.STYLESHEET:
         node.status = Status.CLOSED
@@ -503,13 +508,22 @@ def color_from_hex(x:int) -> Color:
 
 def css_to_dict(head:CSSNode) -> Dict:
     css_dict = {}
+    fonts = []
+    font = {}
     selectors = None
     k = None
     for node in walk(head):
-        if node.name is CSS.RULE: selectors = node.data if isinstance(node.data, tuple) else (node.data,)
+        if node.name is CSS.RULE:
+            if font:
+                fonts.append(font)
+                font = {}
+            selectors = node.data if isinstance(node.data, (tuple, list)) else (node.data,)
         elif node.name is CSS.DECLARATION:
             if len(node.data) == 1: k = node.data[0] # value is in either function or identity children
             else:
+                if selectors == ("@font-face",):
+                    font[node.data[0]] = node.data[1]
+                    continue
                 # make line-height unit explicit if not given
                 if node.data[0] == "line-height" and isinstance(node.data[1], (float, int)): node.data= ("line-height", (node.data[1],"em",)) 
                 k, v = node.data[0], node.data[1:]
@@ -517,20 +531,37 @@ def css_to_dict(head:CSSNode) -> Dict:
                 for k0, v0 in zip(k, v):
                     v0 = v0[0] if isinstance(v0, tuple) and len(v0) == 1 else v0
                     v0 = color_from_hex(int(v0[1:], base=16)) if isinstance(v0, str) and v0.startswith("#") else v0
-                    for s in selectors: css_dict.setdefault(s, {})[k0] = v0
+                    for s in selectors: css_dict.setdefault(selector_node(s), {})[k0] = v0
         elif node.name in (CSS.IDENTITY, CSS.FUNCTION):
             if node.name is CSS.IDENTITY:
                 k, _ = expand_css_shorthand(k, node.data[0])
                 for s in selectors:
                     for k0 in k:
-                        css_dict.setdefault(s, {})[k0] = node.data[0]
+                        css_dict.setdefault(selector_node(s), {})[k0] = node.data[0]
             else:
                 assert len(node.data) == 2
                 f, arg = node.data
-                for s in selectors: css_dict.setdefault(s, {}).setdefault(k, {})[f] = arg
-                # if not isinstance(current, list): css_dict[s][k] = [current]
-                # css_dict[s][k].append(node)
-    return css_dict
+                if font:
+                    assert k == "src"
+                    font[f] = arg
+                else:
+                    for s in selectors: css_dict.setdefault(selector_node(s), {}).setdefault(k, {})[f] = arg
+    if font: fonts.append(font)
+    return css_dict, fonts
+
+@dataclass(frozen=True)
+class Selector:
+    k:K
+    cls:List[str] = None
+    ids:List[str] = None
+    pseudocls:List[str] = None
+
+def selector_node(selector:str) -> Selector:
+    tag = m.group() if (m:=re.match(r"[a-zA-Z]+[_a-zA-Z0-9\-]*", selector)) else "any"
+    cls = tuple(re.findall(r"\.(\-?[_a-zA-Z]+[_a-zA-Z0-9\-]*)", selector))
+    ids = tuple(re.findall(r"#(\-?[_a-zA-Z]+[_a-zA-Z0-9\-]*)", selector))
+    pseudocls = tuple(re.findall(r":([a-zA-Z]+[_a-zA-Z0-9\-\(\)]*)", selector))
+    return Selector(K[tag.upper()], cls if cls else None, ids if ids else None, pseudocls if pseudocls else None)
 
 # NOTE: margin: 0, auto not supported because mix of identity and other
 # NOTE: margin: calc(100% - 5px) not supported
