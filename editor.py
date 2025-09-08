@@ -325,8 +325,6 @@ def erase(frame:Node, right=False):
     frame.children = [markdown]
     markdown.parent = frame
     populate_render_data(frame, SS.css, reset=True)
-
-    show(frame)
     frame.cursor.update(frame.cursor.idx - (0 if right or frame.cursor.selection else 1))
 
 def write(frame:Node, text:str):

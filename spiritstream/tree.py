@@ -40,8 +40,8 @@ PATTERN = re.compile("|".join([
     r"(?P<opening_parenthesis>(?<!\\)\()",
     r"(?P<closing_parenthesis>(?<!\\)\))",
 
-    r"(?P<double_inline_code>(?<![`\\])``(?!`))",
-    r"(?P<inline_code>(?<![\\])`(?!`))", # no negative lookbehind for another ` because that would already have matched with double_inline_code
+    r"(?P<double_inline_code>(?<![`\\])``(?=[^`]))",
+    r"(?P<inline_code>(?<![\\])`(?=[^`]))", # no negative lookbehind for another ` because that would already have matched with double_inline_code
 
     r"(?P<text>[\s\S]+?)"
 ]), re.MULTILINE)
