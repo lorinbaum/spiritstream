@@ -150,13 +150,12 @@ class cmap_subtable(table):
 
                 def getGlyphIndex(unicode:int):
                     for i in range(self.segCount):
-                        if unicode <= self.endCode[i]:
-                            if self.startCode[i] <= unicode:
-                                glyphIndex = int((i + self.idRangeOffset[i] / 2 + (unicode - self.startCode[i])) - len(self.idRangeOffset))
-                                # v = self.getGlyphIndex[glyphIndex]
-                                v = self.glyphIdArray[glyphIndex]
-                                if v != 0: return (self.idDelta[i] + v) % 65536
-                                elif self.idRangeOffset[i] == 0: return (self.idDelta[i] + unicode) & 65536
+                        if self.startCode[i] <= unicode <= self.endCode[i]:
+                            if self.idRangeOffset[i] == 0: return (unicode + self.idDelta[i]) % 65536
+                            else:
+                                offset = self.idRangeOffset[i] // 2 + (unicode - self.startCode[i])
+                                glyph_index = self.glyphIdArray[offset - (self.segCount - i)]
+                                return (glyph_index + self.idDelta[i]) % 65536 if glyph_index != 0 else 0
                     return 0 # missing character glyph
                 self.getGlyphIndex = getGlyphIndex
 
@@ -312,3 +311,11 @@ class glyphComponent(table):
         elif self.WE_HAVE_A_TWO_BY_TWO: self.xscale, self.scale01, self.scale10, self.yscale = b.parse(F2Dot14, count=4)
         assert self.Reserved == False # reserved bits should be set to 0
         assert int(self.WE_HAVE_A_SCALE) + int(self.WE_HAVE_AN_X_AND_Y_SCALE) + int(self.WE_HAVE_A_TWO_BY_TWO) in [0,1] # at most one of these flags can be True at a time
+
+class post_table(table):
+    def _from_bytes(self, b:Parser):
+        self.format = b.parse(Fixed)
+        self.italicAngle = b.parse(Fixed)
+        self.underlinePosition = b.parse(FWord)
+        self.underlineThickness = b.parse(FWord)
+        # there is more here, but thats not needed

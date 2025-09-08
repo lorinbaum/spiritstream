@@ -38,6 +38,7 @@ class TTF:
         self.loca = p.parse(uint32 if self.head.indexToLocFormat else uint16, count=self.maxp.numGlyphs, offset=self.table_directory["loca"].offset)
         self.hhea = p.parse(hhea_table, offset=self.table_directory["hhea"].offset)
         self.hmtx = p.parse(hmtx_table, offset=self.table_directory["hmtx"].offset, numOfLongHorMetrics=self.hhea.numOfLongHorMetrics, numGlyphs=self.maxp.numGlyphs)
+        self.post = p.parse(post_table, offset=self.table_directory["post"].offset)
         self.glyf = p.b[(t:=self.table_directory["glyf"]).offset:t.offset+t.length] # raw bytes of glyf table
         if self.debug:
             print(f"Contains tables: {list(self.table_directory.keys())}")

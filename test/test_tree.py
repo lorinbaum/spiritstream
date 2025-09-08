@@ -27,7 +27,7 @@ TEST_CASES = [
     },
     {
         "name": "codeblock",
-        "md": "hamedi\n~~~language line\n# no heading\n~~~\n``\n``` language \n\tcode\n```",
+        "md": "hamedi\n~~~language line\n# no heading\n~~~\n``\n``` language \n\tcode\n```\n",
         "tokens": [{"name": "paragraph_line"},
             {"name":"codeblock", "data": ("language line", 16)},
             {"name": "paragraph_line"},
@@ -35,9 +35,13 @@ TEST_CASES = [
             {"name": "codeblock", "data": ("language", 13)}],
         "nodes": [{"name": K.BODY},
             {"name": K.P},
-            {"name": K.CB, "data": {"language": "language line"}},
+            {"name": K.CODE, "data": {"language": "language line"}},
             {"name": K.P},
-            {"name": K.CB, "data": {"language": "language"}}]
+            {"name": K.P},
+            {"name": K.P},
+            {"name": K.CODE, "data": {"language": "language"}},
+            {"name": K.P},
+            {"name": K.P}]
     },
     {
         "name": "horizontal rule *_",
@@ -61,7 +65,7 @@ TEST_CASES = [
             {"name": K.HR},
             {"name": K.HR},
             {"name": K.HR},
-            {"name": K.CB}]
+            {"name": K.CODE}]
     },
     {
     "name": "horizontal rule -",
@@ -85,7 +89,7 @@ TEST_CASES = [
         {"name": K.HR},
         {"name": K.HR},
         {"name": K.HR},
-        {"name": K.CB}]
+        {"name": K.CODE}]
     },
     {
         "name": "blockquote",
@@ -99,7 +103,7 @@ TEST_CASES = [
             {"name": "paragraph_line"}],
         "nodes": [{"name": K.BODY},
             {"name": K.BLOCKQUOTE, "data": {"depth": 1}},
-            {"name": K.CB},
+            {"name": K.CODE},
             {"name": K.BLOCKQUOTE, "data": {"depth": 1}},
             {"name": K.BLOCKQUOTE, "data": {"depth": 2}},
             {"name": K.P}],
@@ -118,9 +122,9 @@ TEST_CASES = [
             {"name": K.UL, "data": {"indent": 0}},
             {"name": K.LI, "data": {"digit": None}},
             {"name": K.LI, "data": {"digit": None}},
-            {"name": K.CB},
+            {"name": K.CODE},
             {"name": K.EMPTY_LINE},
-            {"name": K.CB}]
+            {"name": K.CODE}]
     },
     {
         "name": "ordered list",
@@ -172,11 +176,11 @@ TEST_CASES = [
             {"name": K.UL, "data": {"indent": 0}},
             {"name": K.LI},
             {"name": K.EMPTY_LINE},
-            {"name": K.CB},
+            {"name": K.CODE},
             {"name": K.OL, "data": {"indent": 0}},
             {"name": K.LI},
             {"name": K.EMPTY_LINE},
-            {"name": K.CB},
+            {"name": K.CODE},
             ]
     },
     {
@@ -192,7 +196,7 @@ TEST_CASES = [
         "nodes": [{"name": K.BODY},
             {"name": K.EMPTY_LINE},
             {"name": K.P},
-            {"name": K.CB}]
+            {"name": K.CODE}]
     },
     {
         "name": "paragraph",
@@ -207,7 +211,7 @@ TEST_CASES = [
             {"name": "paragraph_line"}],
         "nodes": [{"name": K.BODY},
             {"name": K.P},
-            {"name": K.CB},
+            {"name": K.CODE},
             {"name": K.EMPTY_LINE},
             {"name": K.P},
             {"name": K.H1},
@@ -426,7 +430,7 @@ TEST_CASES = [
             {"name": K.P},
             {"name": K.A, "data": {"linktype": "md switched"}},
             {"name": K.A, "data": {"linktype": "md switched"}},
-            {"name": K.CB},
+            {"name": K.CODE},
             {"name": K.P},
             {"name": K.A, "data": {"linktype": "md switched"}},
             {"name": K.A, "data": {"linktype": "md switched"}},
@@ -470,13 +474,13 @@ TEST_CASES = [
             {"name": "double_inline_code"}],
         "nodes": [{"name": K.BODY},
             {"name": K.P},
-            {"name": K.DOUBLE_INLINE_CODE},
-            {"name": K.DOUBLE_INLINE_CODE},
-            {"name": K.DOUBLE_INLINE_CODE},
-            {"name": K.INLINE_CODE},
-            {"name": K.DOUBLE_INLINE_CODE},
-            {"name": K.INLINE_CODE},
-            {"name": K.INLINE_CODE}]
+            {"name": K.CODE, "type":"double"},
+            {"name": K.CODE, "type":"double"},
+            {"name": K.CODE, "type":"double"},
+            {"name": K.CODE, "type":"single"},
+            {"name": K.CODE, "type":"double"},
+            {"name": K.CODE, "type":"single"},
+            {"name": K.CODE, "type":"single"}]
     }
 ]
 
