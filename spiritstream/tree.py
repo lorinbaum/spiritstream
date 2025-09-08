@@ -8,7 +8,7 @@ PATTERN = re.compile("|".join([
     r"^(?P<empty_line>[\s]*?\n|\Z)",
     r"^(?P<codeblock>```[\s\S]*?\n```\n|~~~[\s\S]*?\n~~~\n)",
     r"^ {0,3}(?P<horizontal_rule>\*(?:[ \t]*\*){2,}[ \t]*|_(?:[ \t]*_){2,}[ \t]*|-(?:[ \t]*-){2,}[ \t]*)$",
-    r"^(?P<listitem>[ \t]*(?:\d+[\.\)]\s+|[-*+][ \t]+))",
+    r"^(?P<listitem>[ \t]*(?:\d+[\.\)][ \t]+|[-*+][ \t]+))",
     r"^(?P<indented_line>(?: {0,3}\t| {4,})[\s\S]*?(?:\n|\Z))",
     r"^ {0,3}(?P<heading>#+)[\t ]+",
     r"^ {0,3}(?P<blockquote_line>>+)",
