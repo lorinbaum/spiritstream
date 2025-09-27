@@ -5,3 +5,5 @@ __pycache__
 *.ipynb
 cache
 GlyphAtlas.bmp
+spiritstream/bindings/build
+home

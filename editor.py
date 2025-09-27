@@ -1,5 +1,6 @@
 from pprint import pprint
 import math, time, pickle, functools, json, argparse
+from enum import Enum, auto
 from typing import Union, List, Dict, Tuple
 from spiritstream.vec import vec2
 from spiritstream.bindings.glfw import *
@@ -9,7 +10,9 @@ from dataclasses import dataclass
 from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
 from spiritstream.helpers import CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
-from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children
+from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children, parents, serialize, sluggify
+from spiritstream.buffer import BaseQuad, QuadBuffer, TexQuadBuffer
+import spiritstream.image as Image
 
 argparser = argparse.ArgumentParser(description="Spiritstream")
 argparser.add_argument("-f", "--file", type=str, help="Path to file to open")
@@ -23,10 +26,13 @@ else:
     TEXTPATH, CURSORIDX = Path(data.get("textpath", "text.txt")), data.get("cursoridx", 0)
     CURSORUP, SCENEY = data.get("cursorup", False), data.get("sceney", 0)
 CSSPATH = data.get("csspath", "theme.css")
+TEXTPATH = TEXTPATH.resolve()
 
 FORMATTING_COLOR = color_from_hex(0xaaa)
 CURSOR_COLOR = color_from_hex(0xfff)
 SELECTION_COLOR = color_from_hex(0x423024)
+
+HERITABLE_STYLES = ["color", "font-family", "font-size", "line-height", "font-weight", "text-transform"]
 
 class Cursor:
     def __init__(self, frame:Node, idx=0, up=False):
@@ -43,17 +49,19 @@ class Cursor:
         if hasattr(node, "children"):
             if isinstance(pos, int):
                 for c in node.children:
-                    if c.start <= pos and ((pos <= c.end and up) or (not up and pos < c.end)): return self._find(c, pos, up)
-                return node if up  or not node.children else self._find(node, pos, True) # try up before giving up
+                    if (up and c.start < pos <= c.end) or (not up and c.start <= pos < c.end): return self._find(c, pos, up)
+                return node
             else:
                 closest, dx, dy = None, math.inf, math.inf
-                for c in node.children:
-                    if c.x <= pos.x < c.x + c.w and c.y <= pos.y < c.y + c.h: return self._find(c, pos) # direct hit
-                    dxc = 0 if c.x <= pos.x <= c.x+c.w else min(abs(pos.x-c.x), abs(pos.x-(c.x+c.w)))
-                    dyc = 0 if c.y <= pos.y <= c.y+c.h else min(abs(pos.y-c.y), abs(pos.y-(c.y+c.h)))
-                    if dyc < dy: closest, dx, dy = c, dxc, dyc
-                    elif dyc == dy and dxc < dx: closest, dx = c, dxc
-                return self._find(closest, pos) if closest is not None else node
+                # NOTE: cannot recursively descend through hit children because <p><img ...><text>...</text></p> and text wrapping causes wrong hitbox
+                for c in walk(node): 
+                    if not c.children:
+                        if c.x <= pos.x < c.x + c.w and c.y <= pos.y < c.y + c.h: return c # direct hit
+                        dxc = 0 if c.x <= pos.x <= c.x+c.w else min(abs(pos.x-c.x), abs(pos.x-(c.x+c.w)))
+                        dyc = 0 if c.y <= pos.y <= c.y+c.h else min(abs(pos.y-c.y), abs(pos.y-(c.y+c.h)))
+                        if dyc < dy: closest, dx, dy = c, dxc, dyc
+                        elif dyc == dy and dxc < dx: closest, dx = c, dxc
+                return node if closest is None else closest
         return node
 
     def update(self, pos:Union[int, vec2], allow_drift:bool=True, up=False, selection=False):
@@ -66,21 +74,19 @@ class Cursor:
         if selection and not self.selection: self.selection.i0, self.selection.up0 = self.idx, self.idx == self.node.end
         node = self._find(self.frame.children[0], pos, up=up)
         if node.k is K.LINE:
-            if isinstance(pos, int):
-                self.idx, self.pos = pos, vec2(node.xs[pos-node.start], node.y)
+            if isinstance(pos, int): self.idx, self.pos = pos, vec2(node.xs[pos-node.start], node.y)
             else:
                 self.idx = node.start + node.xs.index(x:=min(node.xs, key=lambda x: abs(x-pos.x)))
                 self.pos = vec2(x, node.y)
         else:
-            assert isinstance(pos, int)
-            node = _find_edit_parent(node, pos)
+            node = _find_edit_parent(node)
             rerender = False
-            if not _in_edit_view(node): rerender = node.edit = True
+            if not _in_edit_view(node): rerender, node.edit = True, Edit.LOCAL
             if rerender:
                 populate_render_data(self.frame, SS.css, reset=True)
-                self.update(pos, allow_drift=allow_drift, selection=selection)
+                self.update(pos if isinstance(pos, int) else node.start, allow_drift=allow_drift, selection=selection)
+                return
             else: raise RuntimeError(f"Could not resolve position {pos} to LINE after enabling edit mode on {node}")
-            return
 
         self.node = node
 
@@ -98,79 +104,68 @@ class Cursor:
                       and (n.start < self.selection.end if self.selection.endup else n.start <= self.selection.end)]
             for l in selected_lines:
                 p = _find_edit_parent(l, l.start)
-                if not _in_edit_view(p) and p.parent.k not in [K.EMPTY_LINE]: rerender = p.edit = True
+                if not _in_edit_view(p) and p.parent.k not in [K.EMPTY_LINE]: rerender, p.edit = True, Edit.LOCAL
                 if p.edit: new_editnodes.add(p)
         else:
             self.selection.reset()
-            QuadBuffer.replace([], "selection")
-        p1 = _find_edit_parent(node, self.idx)
+            SS.quad_buffer_selection.clear()
+        p1 = _find_edit_parent(node)
         if p1.parent.k not in [K.EMPTY_LINE]: # edit mode changes nothing here, save some rerenders
-            if not _in_edit_view(p1): rerender = p1.edit = True
+            if not _in_edit_view(p1): rerender, p1.edit = True, Edit.LOCAL
             if p1.edit: new_editnodes.add(p1)
         # if cursor between nodes on same line, edit=True on both
         node2 = self._find(self.frame.children[0], self.idx, up=self.idx == node.start)
-        p2 = _find_edit_parent(node2, self.idx)
+        p2 = _find_edit_parent(node2)
         if node.y == node2.y and p2.parent.k not in [K.EMPTY_LINE]:
-            if not _in_edit_view(p2): rerender = p2.edit = True
+            if not _in_edit_view(p2): rerender, p2.edit = True, Edit.LOCAL
             if p2.edit: new_editnodes.add(p2)
 
         for n in self.frame.editnodes:
-            if n not in new_editnodes: n.edit = False # If frame in editnodes (everthing rendered in edit view), rerender is never True
+            if n not in new_editnodes: n.edit = None # If frame in editnodes (everthing rendered in edit view), rerender is never True
         if new_editnodes != self.frame.editnodes: rerender = True
         self.frame.editnodes = new_editnodes
         if rerender:
             populate_render_data(self.frame, SS.css, reset=True)
-            self.update(self.idx, allow_drift=allow_drift, selection=selection)
+            self.update(self.idx, allow_drift=allow_drift, selection=selection, up=self.idx == self.node.end)
         else:
             if allow_drift: self.x = self.pos.x
-            QuadBuffer.replace([*self.pos.components(), 0.4, 2, node.h, (c:=CURSOR_COLOR).r, c.g, c.b, c.a], "cursor")
+            SS.quad_buffer_cursor.replace([*self.pos.components(), 0.4, 2, node.h, (c:=CURSOR_COLOR).r, c.g, c.b, c.a])
             if self.selection:
                 selectionQuads = []
                 for l in selected_lines:
                     x0 = l.xs[self.selection.start-l.start] if l.start < self.selection.start else l.x
                     x1 = l.xs[self.selection.end-l.start] if l.end > self.selection.end else l.x+l.w
                     selectionQuads.extend([x0-2, l.y, 0.55, x1-x0+4, l.h, (c:=SELECTION_COLOR).r, c.g, c.b, c.a])
-                if selectionQuads: QuadBuffer.replace(selectionQuads, "selection")
+                if selectionQuads: SS.quad_buffer_selection.replace(selectionQuads)
 
     def move(self, d:str, selection):
         assert self.node is not None
         if d == "up":
             pos = vec2(self.pos.x if self.x is None else self.x, self.pos.y)
-            lines = (n for n in walk(self.frame) if n.k is K.LINE and n.y < self.node.y)
+            leafs = (n for n in walk(self.frame) if not n.children and n.y < self.node.y)
             closest, dx, dy = None, math.inf, math.inf
-            for l in lines:
+            for l in leafs:
                 dxc = 0 if l.x <= pos.x <= l.x+l.w else min(abs(pos.x-l.x), abs(pos.x-(l.x+l.w)))
                 dyc = 0 if l.y <= pos.y <= l.y+l.h else min(abs(pos.y-l.y), abs(pos.y-(l.y+l.h)))
                 if dyc < dy: closest, dx, dy = l, dxc, dyc
                 elif dyc == dy and dxc < dx: closest, dx = l, dxc
             if closest is None: self.move("start", selection)
             else:
-                idx = closest.start + closest.xs.index(min(closest.xs, key=lambda x: abs(x-pos.x)))
+                idx = closest.start + closest.xs.index(min(closest.xs, key=lambda x: abs(x-pos.x))) if closest.k is K.LINE else closest.start
                 self.update(idx, selection=selection, allow_drift=False, up=idx==closest.end)
-        elif d == "right":
-            if self.selection and not selection: self.update(self.selection.end, up=self.selection.endup)
-            else:
-                if self.idx in self.frame.wraps and self.idx==self.node.end: self.update(self.idx, selection=selection)
-                elif self.idx+1 in self.frame.wraps: self.update(self.idx+1, selection=selection, up=True)
-                else: self.update(self.idx + 1, selection=selection)
         elif d == "down":
             pos = vec2(self.pos.x if self.x is None else self.x, self.pos.y)
-            lines = (n for n in walk(self.frame) if n.k is K.LINE and n.y > self.node.y)
+            leafs = (n for n in walk(self.frame) if not n.children and n.y > self.node.y)
             closest, dx, dy = None, math.inf, math.inf
-            for l in lines:
+            for l in leafs:
                 dxc = 0 if l.x <= pos.x <= l.x+l.w else min(abs(pos.x-l.x), abs(pos.x-(l.x+l.w)))
                 dyc = 0 if l.y <= pos.y <= l.y+l.h else min(abs(pos.y-l.y), abs(pos.y-(l.y+l.h)))
                 if dyc < dy: closest, dx, dy = l, dxc, dyc
                 elif dyc == dy and dxc < dx: closest, dx = l, dxc
             if closest is None: self.move("end", selection)
             else:
-                idx = closest.start + closest.xs.index(min(closest.xs, key=lambda x: abs(x-pos.x)))
+                idx = closest.start + closest.xs.index(min(closest.xs, key=lambda x: abs(x-pos.x))) if closest.k is K.LINE else closest.start
                 self.update(idx, selection=selection, allow_drift=False, up=idx==closest.end)
-        elif d == "left":
-            if self.selection and not selection: self.update(self.selection.start, up=self.selection.startup)
-            else:
-                if self.idx in self.frame.wraps and not self.idx==self.node.end: self.update(self.idx, selection=selection, up=True)
-                else: self.update(self.idx - 1, selection=selection)
         elif d == "start":
             lines = (n for n in walk(self.frame) if n.k is K.LINE and n.y <= self.node.y)
             linestarts, prevy = [], -math.inf
@@ -201,18 +196,9 @@ class Cursor:
                 else: self.update(idx - 1, selection=selection)
             else: raise RuntimeError
 
-def _in_edit_view(node:Node) -> bool: return False if node is None else True if node.edit is True else _in_edit_view(node.parent)
+def _in_edit_view(node:Node) -> bool: return _find_edit_parent(node).edit in [Edit.LOCAL, Edit.GLOBAL] or any((n.edit is Edit.GLOBAL for n in parents(node)))
  
-def _find_edit_parent(node:Node, idx:int) -> Node:
-    """Finds the node that if edit=True is set, makes idx available."""
-    assert node.start <= idx <= node.end, f"Invalid Arguments: {idx=} not between {node.start=} and {node.end=}"
-    assert node.k is not K.TEXT, "TEXT must have children that fill its start/end range and idx should be found separately"
-    if node.k is K.LINE:
-        if node.parent.k is K.TEXT: return node.parent
-        else: 
-            start = node.parent.start <= idx < node.parent.children[0].start
-            return next((n for n in (node.parent.children if start else reversed(node.parent.children)) if n.k is K.TEXT))
-    else: return next((n for n in node.children if n.k is K.TEXT)) # return any text child since any will turn on edit mode for the whole parent
+def _find_edit_parent(node:Node, idx=None) -> Node: return next((n for n in (node, *parents(node)) if n.k not in [K.LINE, K.TEXT, K.IMG]))
 
 @dataclass
 class Selection:
@@ -231,19 +217,20 @@ class Selection:
     def endup(self): return self.up0 if self.i0 > self.i1 else self.up1
 
     def reset(self): self.i0 = self.up0 = self.i1 = self.up1 = None
+    def copy(self): return Selection(self.i0, self.up0, self.i1, self.up1)
     def __bool__(self): return all((i is not None for i in (self.i0, self.up0, self.i1, self.up1)))
 
 def typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left",
             start=0) -> Tuple[Node, List[float]]:
     lines, idata, wraps = _typeset(text, x, y, width, fontfamily, fontsize, fontweight, color, lineheight, newline_x, align, start)
-    TexQuadBuffer.add(idata)
+    SS.glyph_buffer.add(idata)
     frame.wraps.extend(wraps)
     return lines
 
 # TODO: select font more carefully. may contain symbols not in font
 # something like g = next((fonŧ[g] for font in fonts if g in font))
 # TODO: line_strings is creating ambiguity, sucks, remove. index into text using line start and end to actually get the text. obviously.
-@functools.cache # TODO custom cache so it can also shift cached lines down
+@functools.lru_cache(maxsize=1024) # TODO custom cache so it can also shift cached lines down
 def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left",
              start=0) -> Tuple[Node, List[float]]:
     """
@@ -255,7 +242,7 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
     cx = x # character x offset
     linepos = vec2(x, y) # top left corner of line hitbox
     if newline_x is None: newline_x = x
-    assert cx <= newline_x + width
+    assert cx <= newline_x + width, (cx, newline_x, width)
     lines, line_strings = Node(K.TEXT, None), [""]
     lstart = 0 # char index where line started
     xs = [] # cursor x positions
@@ -312,83 +299,7 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
                     color.r, color.g, color.b, color.a] # color 
     return lines, instance_data, wraps
 
-@GLFWframebuffersizefun
-def framebuffer_size_callback(window, width, height): SS.w, SS.h, SS.resized = width, height, True
-
-@GLFWcharfun
-def char_callback(window, codepoint): write(frame, chr(codepoint))
-
-def erase(frame:Node, right=False):
-    if frame.cursor.selection: frame.text = frame.text[:frame.cursor.selection.start] + frame.text[frame.cursor.selection.end:]
-    else: frame.text = frame.text[:max(frame.cursor.idx - (0 if right else 1), 0)] + frame.text[(frame.cursor.idx + (1 if right else 0)):]
-    markdown = parse(frame.text)
-    frame.children = [markdown]
-    markdown.parent = frame
-    populate_render_data(frame, SS.css, reset=True)
-    frame.cursor.update(frame.cursor.idx - (0 if right or frame.cursor.selection else 1))
-
-def write(frame:Node, text:str):
-    if frame.cursor.selection: frame.text = frame.text[:frame.cursor.selection.start] + text + frame.text[frame.cursor.selection.end:]
-    else: frame.text = frame.text[:frame.cursor.idx] + text + frame.text[frame.cursor.idx:]
-    markdown = parse(frame.text)
-    frame.children = [markdown]
-    markdown.parent = frame
-    populate_render_data(frame, SS.css, reset=True)
-    frame.cursor.update((frame.cursor.selection.start if frame.cursor.selection else frame.cursor.idx) + len(text))
-
-@GLFWkeyfun
-def key_callback(window, key:int, scancode:int, action:int, mods:int):
-    if action in [GLFW_PRESS, GLFW_REPEAT]:
-        selection = bool(mods & GLFW_MOD_SHIFT)
-        if key == GLFW_KEY_LEFT: frame.cursor.move("left", selection)
-        elif key == GLFW_KEY_RIGHT: frame.cursor.move("right", selection)
-        elif key == GLFW_KEY_UP: frame.cursor.move("up", selection)
-        elif key == GLFW_KEY_DOWN: frame.cursor.move("down", selection)
-        if key == GLFW_KEY_BACKSPACE: erase(frame)
-        if key == GLFW_KEY_DELETE: erase(frame, right=True)
-        if key == GLFW_KEY_ENTER: write(frame, "\n")
-        if key == GLFW_KEY_S:
-            if mods & GLFW_MOD_CONTROL: # SAVE
-                with open(TEXTPATH, "w") as f: f.write(frame.text)
-        if key == GLFW_KEY_A and mods & GLFW_MOD_CONTROL:  # select all
-            frame.cursor.selection = Selection(0, False, len(frame.text), False)
-            frame.cursor.update(len(frame.text), selection=True)
-        if key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and frame.cursor.selection:
-            glfwSetClipboardString(window, frame.text[frame.cursor.selection.start:frame.cursor.selection.end].encode()) # copy
-        if key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: write(frame, glfwGetClipboardString(window).decode()) # paste
-        if key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and frame.cursor.selection: # cut
-            glfwSetClipboardString(window, frame.text[frame.cursor.selection.start:frame.cursor.selection.end].encode()) # copy
-            erase(frame)
-        elif key == GLFW_KEY_HOME: frame.cursor.move("start", selection)
-        elif key == GLFW_KEY_END: frame.cursor.move("end", selection)
-
-@GLFWmousebuttonfun
-def mouse_callback(window, button:int, action:int, mods:int):
-    if button == GLFW_MOUSE_BUTTON_1 and action is GLFW_PRESS:
-        x, y = ctypes.c_double(), ctypes.c_double()
-        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-        frame.cursor.update(vec2(x.value - SCENE.x, y.value - SCENE.y), selection=glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS)
-
-@GLFWcursorposfun
-def cursor_pos_callback(window, x, y):
-    if glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS:
-        x, y = ctypes.c_double(), ctypes.c_double()
-        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-        frame.cursor.update(vec2(x.value - SCENE.x, y.value - SCENE.y), selection=True)
-
-@GLFWscrollfun
-def scroll_callback(window, x, y): SCENE.y += y * 40
-
-HERITABLE_STYLES = ["color", "font-family", "font-size", "line-height", "font-weight", "text-transform"]
-
-def pseudoclass(node:Node, pseudocl:str) -> bool: return False # TODO
-
-def selector_match(sel:Selector, node:Node) -> bool: return all((
-    sel.k is node.k,
-    (all((i in node.cls if node.cls else [] for i in sel.cls))) if sel.cls else True,
-    (all((i in node.ids if node.ids else [] for i in sel.ids))) if sel.ids else True,
-    (all((pseudoclass(node, i) for i in sel.pseudocls))) if sel.pseudocls else True,
-))
+class Edit(Enum): GLOBAL, LOCAL = auto(), auto() # GLOBAL affects gaps in all descendants, LOCAL affects only gaps in direct children, 
 
 def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=None, reset:bool=False) -> Tuple[vec2, vec2, vec2]:
     """
@@ -411,8 +322,12 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
     Returns: Tuple(_block, _inline, _margin) used internally for positioning siblings
     """
     if reset:
-        QuadBuffer.clear()
-        TexQuadBuffer.clear()
+        SS.quad_buffer_bg.clear()
+        SS.quad_buffer_cursor.clear()
+        SS.quad_buffer_selection.clear()
+        SS.glyph_buffer.clear()
+        for b in SS.img_buffers: b.clear()
+        SS.img_buffers.clear()
         to_delete = list(filter(lambda x: x.k is K.LINE, walk(node)))
         for l in to_delete: l.parent.children.remove(l)
         frame.wraps = []
@@ -445,9 +360,40 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
         style["_margin"] = vec2(style["margin-right"], 0)
         style["_inline"] = pstyle["_inline"] + vec2(style["margin-left"], 0)
         node.x, node.y = style["_inline"].x, style["_inline"].y
+        if node.k is K.IMG and not edit_view:
+            path = TEXTPATH.parent.joinpath(text[node.href[0]:node.href[1]]).resolve()
+            if not path.exists(): path = Path(__file__).parent / "home/Image-not-found.png"
+            if path.as_posix() not in SS.img_cache:
+                img = Image.read(path)
+                assert img.color
+                texture = ctypes.c_uint()
+                glGenTextures(1, ctypes.byref(texture))
+                glBindTexture(GL_TEXTURE_2D, texture)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, img.width, img.height, 0, GL_RGB, GL_UNSIGNED_BYTE, img.data)
+                glBindTexture(GL_TEXTURE_2D, 0)
+                img = SS.img_cache[path.as_posix()] = {"width": img.width, "height": img.height, "buffer": TexQuadBuffer(SS.base_quad, texture, img_shader)}
+            else: img = SS.img_cache[path.as_posix()]
+            node.w = min(style["_width"], img["width"])
+            if node.x - pstyle["_block"].x + node.w > style["_width"]: node.x, node.y = pstyle["_block"].x, node.y + style["line-height"]
+            node.h = node.w / img["width"] * img["height"]
+            img["buffer"].add([node.x, node.y, 0.5, node.w, node.h])
+            SS.img_buffers.add(img["buffer"])
+            style["_block"] = vec2(pstyle["_block"].x, node.y + node.h)
+
+            font, _ = get_font(style["font-family"], style["font-weight"])
+            ascentpx = font.engine.hhea.ascent * style["font-size"] / font.engine.head.unitsPerEM
+            descentpx = font.engine.hhea.descent * style["font-size"] / font.engine.head.unitsPerEM
+            total = ascentpx - descentpx
+            style["_inline"] = vec2(node.x + node.w, node.y + node.h - (style["line-height"] - total)/2 - ascentpx)
+
+            return style["_block"], style["_inline"], vec2(style["margin-bottom"], 0) # early return because img never has children
         if node.k is K.TEXT:
             y = node.y
-            if node.parent.k is K.HR and not edit_view: QuadBuffer.add([node.x, node.y, 0.6, style["_width"], 1, (c:=style["color"]).r, c.g, c.b, c.a])
+            if node.parent.k is K.HR and not edit_view: SS.quad_buffer_bg.add([node.x, node.y, 0.6, style["_width"], 1, (c:=style["color"]).r, c.g, c.b, c.a])
             if node.parent.k is K.LI and not edit_view:
                 if node.parent.parent.k is K.UL:
                     y = node.y + style["font-size"] * 0.066666 # hack to approximate browser rendering. Shift without changing node.y for talled node.
@@ -460,15 +406,15 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
             lines = typeset(t, node.x, y, style["_width"], style["font-family"], style["font-size"], style["font-weight"], style["color"], style["line-height"],
                             pstyle["_block"].x, start=node.start)
             if node.parent.k is K.A:
-                    font = get_font(style["font-family"], style["font-weight"])
-                    ascentpx = font.engine.hhea.ascent * style["font-size"] / font.engine.head.unitsPerEM
-                    descentpx = font.engine.hhea.descent * style["font-size"] / font.engine.head.unitsPerEM
-                    total = ascentpx - descentpx
-                    for l in lines.children:
-                        underline_pos = font.engine.fupx(font.engine.post.underlinePosition)
-                        underline_y = l.y + ascentpx + (style["line-height"] - total)/2 - underline_pos
-                        h = max(1, font.engine.fupx(font.engine.post.underlineThickness))
-                        QuadBuffer.add([l.x, underline_y, 0.6, l.w, h, (c:=style["color"]).r, c.g, c.b, c.a])
+                font, _ = get_font(style["font-family"], style["font-weight"])
+                ascentpx = font.engine.hhea.ascent * style["font-size"] / font.engine.head.unitsPerEM
+                descentpx = font.engine.hhea.descent * style["font-size"] / font.engine.head.unitsPerEM
+                total = ascentpx - descentpx
+                for l in lines.children:
+                    underline_pos = font.engine.fupx(font.engine.post.underlinePosition)
+                    underline_y = l.y + ascentpx + (style["line-height"] - total)/2 - underline_pos
+                    h = max(1, font.engine.fupx(font.engine.post.underlineThickness))
+                    SS.quad_buffer_bg.add([l.x, underline_y, 0.6, l.w, h, (c:=style["color"]).r, c.g, c.b, c.a])
             steal_children(lines, node)
             c = node.children[-1]
             style["_block"] = vec2(pstyle["_block"].x, c.y + c.h)
@@ -479,34 +425,40 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
     # NOTE: Formatting text is put OUTSIDE of TEXT nodes because their start/end is outside. Expanding TEXT start/end would falsify content
     for_children.update({k:v for k,v in style.items() if k in ["_block", "_inline", "_margin", "_width"]})
     edit_view_lines = [] # List[Tuple[idx, lines]]
-    child_edit_view = (edit_view or any((_in_edit_view(n) for n in node.children if n.k is K.TEXT))) and node.k not in [K.SS, K.SCENE, K.FRAME, K.BODY]
-    for i, child in enumerate(node.children):
-        if child.k is not K.LINE:
-            if child_edit_view:
-                start = end = None
-                if i == 0 and node.start != child.start: start, end = node.start, child.start
-                elif i > 0 and node.children[i-1].end != child.start: start, end = node.children[i-1].end, child.start
-                if start is not None:
-                    if child.k not in INLINE_NODES: style["_inline"].x = pstyle["_block"].x
-                    lines = typeset(text[start:end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
-                                    style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=start)
-                    edit_view_lines.append((i, lines.children))
+    child_edit_view = edit_view and node.k not in [K.SS, K.SCENE, K.FRAME, K.BODY]
+    if node.children:
+        for i, child in enumerate(node.children):
+            if child.k is not K.LINE:
+                if child_edit_view:
+                    start = end = None
+                    if i == 0 and node.start != child.start: start, end = node.start, child.start
+                    elif i > 0 and node.children[i-1].end != child.start: start, end = node.children[i-1].end, child.start
+                    if start is not None:
+                        if child.k not in INLINE_NODES: for_children["_inline"].x = pstyle["_block"].x
+                        lines = typeset(text[start:end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
+                                        style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=start)
+                        edit_view_lines.append((i, lines.children))
+                        for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
+                        for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
+                    
+                for_children["_block"], for_children["_inline"], for_children["_margin"] = populate_render_data(child, css_rules, for_children, text)
+
+                if i == len(node.children) - 1 and child_edit_view and child.end != node.end:
+                    lines = typeset(text[child.end:node.end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
+                                    style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=child.end)
+                    edit_view_lines.append((i+1, lines.children))
                     for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
                     for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
-                
-            for_children["_block"], for_children["_inline"], for_children["_margin"] = populate_render_data(child, css_rules, for_children, text)
-
-            if child.k is K.LINE: print(child)
-            if i == len(node.children) - 1 and child_edit_view and child.end != node.end:
-                lines = typeset(text[child.end:node.end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
-                                style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=child.end)
-                edit_view_lines.append((i+1, lines.children))
-                for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
-                for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
-    for idx, lines in reversed(edit_view_lines): # insertions are delayed until here to preserve insertion idx accuracy
-        for l in reversed(lines):
-            l.parent = node
-            node.children.insert(idx, l)
+        for idx, lines in reversed(edit_view_lines): # insertions are delayed until here to preserve insertion idx accuracy
+            for l in reversed(lines):
+                l.parent = node
+                node.children.insert(idx, l)
+    elif child_edit_view:
+        lines = typeset(text[node.start:node.end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
+                                    style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=node.start)
+        steal_children(lines, node)
+        for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
+        for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
 
     style.update({k:v for k,v in for_children.items() if k in ["_block", "_inline", "_margin", "_width"]})
 
@@ -516,14 +468,14 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
             if not getattr(node, "w", None): node.w = max([c.x + c.w for c in node.children]) - node.x # applies to frame node
             node.h = (end := node.children[-1].y + node.children[-1].h + style["padding-bottom"]) - node.y
             if (c:=style.get("background-color")) and isinstance(c, Color): # ignoring "black", "red" and such
-                QuadBuffer.add([node.x, node.y, 0.6, node.w, node.h, (c:=style["background-color"]).r, c.g, c.b, c.a])
+                SS.quad_buffer_bg.add([node.x, node.y, 0.6, node.w, node.h, (c:=style["background-color"]).r, c.g, c.b, c.a])
             return (_block:=vec2(pstyle["_block"].x, end)), _block, vec2(0, style["margin-bottom"]) # _block, _inline, _margin
         else:
             node.h = style["padding-top"] + style["padding-bottom"]
             return (_block:=pstyle["_block"] + vec2(0, style["padding-bottom"]), _block, vec2(0, style["margin-bottom"]))
     else:
+        # backgroundcolor not supported
         if node.children:
-            # backgroundcolor not supported
             node.w = max([c.x + c.w for c in node.children]) - node.x
             node.h = node.children[-1].y + node.children[-1].h - node.y
         else:
@@ -551,7 +503,88 @@ def csspx(pstyle:Dict, style:Dict, k:str) -> float:
         elif u == "%": return (pstyle["font-size"] if k == "font-size" else pstyle["_width"]) * v / 100
     return v[0] if isinstance(v, tuple) and len(v) == 1 else v
 
-SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1800)
+@GLFWframebuffersizefun
+def framebuffer_size_callback(window, width, height): SS.w, SS.h, SS.resized = width, height, True
+
+@GLFWcharfun
+def char_callback(window, codepoint): queue_event("write", chr(codepoint))
+
+@GLFWkeyfun
+def key_callback(window, key:int, scancode:int, action:int, mods:int):
+    if action in [GLFW_PRESS, GLFW_REPEAT]:
+        selection = bool(mods & GLFW_MOD_SHIFT)
+        ctrl = bool(mods & GLFW_MOD_CONTROL)
+        if key == GLFW_KEY_LEFT: queue_event(f"cursor_left_{selection}", 1)
+        elif key == GLFW_KEY_RIGHT: queue_event(f"cursor_right_{selection}", 1)
+        elif key == GLFW_KEY_UP: queue_event(f"cursor_up_{selection}", 1)
+        elif key == GLFW_KEY_DOWN: queue_event(f"cursor_down_{selection}", 1)
+        
+        elif key == GLFW_KEY_BACKSPACE: queue_event("erase_left", 1)
+        elif key == GLFW_KEY_DELETE: queue_event("erase_right", 1)
+        elif key == GLFW_KEY_ENTER and ctrl: queue_event("open_link")
+        elif key == GLFW_KEY_ENTER: queue_event("write", "\n")
+
+        elif key == GLFW_KEY_C and mods & GLFW_MOD_CONTROL and frame.cursor.selection: queue_event("copy")
+        elif key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: queue_event("write", glfwGetClipboardString(window).decode()) # paste
+        elif key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and frame.cursor.selection: queue_event("cut") # cut
+
+        elif key == GLFW_KEY_HOME: queue_event(f"start_{selection}")
+        elif key == GLFW_KEY_END: queue_event(f"end_{selection}")
+
+        elif key == GLFW_KEY_S and ctrl: queue_event("save")
+        elif key == GLFW_KEY_A and mods & GLFW_MOD_CONTROL: queue_event("select_all")
+        elif key == GLFW_KEY_ESCAPE: queue_event("close")
+        elif key == GLFW_KEY_E and ctrl: queue_event("export")
+
+@GLFWmousebuttonfun
+def mouse_callback(window, button:int, action:int, mods:int):
+    if button == GLFW_MOUSE_BUTTON_1 and action is GLFW_PRESS:
+        x, y = ctypes.c_double(), ctypes.c_double()
+        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
+        pos, selection = vec2(x.value - SCENE.x, y.value - SCENE.y), glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS
+        queue_event(f"cursor_pos_{selection}_{pos.x}_{pos.y}")
+        if mods & GLFW_MOD_CONTROL: queue_event("open_link")
+
+@GLFWcursorposfun
+def cursor_pos_callback(window, x, y):
+    if glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS:
+        x, y = ctypes.c_double(), ctypes.c_double()
+        glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
+        queue_event(f"cursor_pos_True_{x.value - SCENE.x}_{y.value - SCENE.y}")
+
+@GLFWscrollfun
+def scroll_callback(window, x, y): SCENE.y += y * 40
+
+def queue_event(name, *data):
+    """Adds to SS.edit_queue. If name matches latest queue entry, adds data to that data (length must match), else appends a new event"""
+    # HACK: mouse_callback and cursor_pos_callback will both cause cursor_pos events. If I just append to the queue, mouse_callback will spam it,
+    # if I always replace the latest one, clicking while dragging will replace the cursor_pos_callback with the mouse_callback which always has
+    # selection on True, then it would use the previous cursor position for the start of a selection (unintended behavior).
+    # allowing max 2 cursor_pos fixes this, allowing click and drag to separate but not spam.
+    if name.startswith("cursor_pos") and len(SS.edit_queue) >= 2 and SS.edit_queue[-2][0].startswith("cursor_pos") and\
+        SS.edit_queue[-1][0].startswith("cursor_pos"): SS.edit_queue[-1] = [name, *data]
+    elif SS.edit_queue and SS.edit_queue[-1][0] == name and name != "open_link": # can't merge open_link
+        assert len(SS.edit_queue[-1]) == len(data) + 1
+        for i, d in enumerate(data): SS.edit_queue[-1][i+1] += d
+    else: SS.edit_queue.append([name, *data])
+
+def pseudoclass(node:Node, pseudocl:str) -> bool: return False # TODO
+
+def selector_match(sel:Selector, node:Node) -> bool: return all((
+    sel.k is node.k,
+    (all((i in node.cls if node.cls else [] for i in sel.cls))) if sel.cls else True,
+    (all((i in node.ids if node.ids else [] for i in sel.ids))) if sel.ids else True,
+    (all((pseudoclass(node, i) for i in sel.pseudocls))) if sel.pseudocls else True,
+))
+
+def text_update(frame):
+    markdown = parse(frame.text)
+    frame.children = [markdown]
+    markdown.parent = frame
+    populate_render_data(frame, SS.css, reset=True)
+    glfwSetWindowTitle(window, (TEXTPATH.name + "*").encode())
+
+SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1000, edit_queue=[])
 SCENE = Node(K.SCENE, SS, x=0, y=SCENEY)
 SS.children = [SCENE]
 
@@ -580,244 +613,30 @@ glfwSetMouseButtonCallback(window, mouse_callback)
 glfwSetCursorPosCallback(window, cursor_pos_callback)
 glfwSetScrollCallback(window, scroll_callback)
 
-def glUnbindBuffers():
-    glBindVertexArray(0)
-    glBindBuffer(GL_ARRAY_BUFFER, 0)
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
+glyph_shader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/glyph.vert", p.parent / "glyph.frag", ["glyphAtlas", "scale", "offset"])
+glyph_shader.setUniform("glyphAtlas", 0, "1i")  # 0 means GL_TEXTURE0)
+quad_shader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/quad.vert", p.parent / "quad.frag", ["scale", "offset"])
+img_shader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/img.vert", p.parent / "img.frag", ["scale", "offset"])
 
-class _BaseQuad:
-    """base unit quad used with instancing"""
-    def __init__(self):
-        #                top-left                 # top-right              # bottom-left            # bottom-right
-        self.vertices = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0]
-        self.indices = [0, 1, 2, 1, 2, 3]
-        self.VBO, self.VAO, self.EBO = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
-        glGenVertexArrays(1, ctypes.byref(self.VAO))
-        glGenBuffers(1, ctypes.byref(self.VBO))
-        glGenBuffers(1, ctypes.byref(self.EBO))
-        
-        glBindVertexArray(self.VAO) # must be bound before EBO
-        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.EBO)
+SS.base_quad = BaseQuad()
+SS.quad_buffer_bg = QuadBuffer(SS.base_quad, quad_shader)
+SS.quad_buffer_cursor = QuadBuffer(SS.base_quad, quad_shader)
+SS.quad_buffer_selection = QuadBuffer(SS.base_quad, quad_shader)
+SS.glyph_buffer = TexQuadBuffer(SS.base_quad, SS.glyphAtlas.texture, glyph_shader, tinted_atlas=True)
+SS.img_buffers = set() # Set[TexQuadBuffer] only images to be rendered
+SS.img_cache = {}
 
-        quad_vertices_ctypes = (ctypes.c_float * len(self.vertices))(*self.vertices)
-        quad_indices_ctypes = (ctypes.c_uint * len(self.indices)) (*self.indices)
-        # pre allocate buffers
-        glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(quad_vertices_ctypes), quad_vertices_ctypes, GL_STATIC_DRAW)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, ctypes.sizeof(quad_indices_ctypes), quad_indices_ctypes, GL_STATIC_DRAW)
-
-        glUnbindBuffers()
-
-    def delete(self):
-        """Free OpenGL resources. Call before program exit"""
-        glDeleteBuffers(1, self.VBO)
-        glDeleteBuffers(1, self.EBO)
-        glDeleteVertexArrays(1, self.VAO)
-        
-BaseQuad = _BaseQuad()
-
-class _TexQuadBuffer:
-    """Buffer for texture quad instances"""
-    def __init__(self):
-        """Create instance data buffer, vertex attribute array and instance variables"""
-        self.changed = False
-        self.count = 0
-        self.data = [] # x, y, z, size w, h, uv offset x, y, uv size w, h, color r, g, b, a
-        self.stride = 13
-        self.sections = {}
-
-        stride_c = self.stride * ctypes.sizeof(ctypes.c_float)
-
-        self.VAO = ctypes.c_uint()
-        glGenVertexArrays(1, ctypes.byref(self.VAO))
-        glBindVertexArray(self.VAO)
-        glBindBuffer(GL_ARRAY_BUFFER, BaseQuad.VBO)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, BaseQuad.EBO)
-        
-        # base quad data attributes: vertex position (loc 0), texture position (loc 1)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(0))
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(1)
-
-        self.VBO = ctypes.c_uint() # instance buffer
-        glGenBuffers(1, ctypes.byref(self.VBO))
-        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-        
-        # Instance attributes (locations 2+; divisor=1 for per-instance)
-        # pos (loc 2)
-        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride_c, ctypes.c_void_p(0))
-        glEnableVertexAttribArray(2)
-        glVertexAttribDivisor(2, 1)
-        # size (loc 3)
-        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride_c, ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(3)
-        glVertexAttribDivisor(3, 1)
-        # uv offset (loc 4)
-        glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, stride_c, ctypes.c_void_p(5*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(4)
-        glVertexAttribDivisor(4, 1)
-        # uv size (loc 5)
-        glVertexAttribPointer(5, 2, GL_FLOAT, GL_FALSE, stride_c, ctypes.c_void_p(7*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(5)
-        glVertexAttribDivisor(5, 1)
-        # color (loc 6)
-        glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, stride_c, ctypes.c_void_p(9*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(6)
-        glVertexAttribDivisor(6, 1)
-
-        glUnbindBuffers()
-
-    def add(self, data, name=None):
-        """If name is provided, add to its section and update position and length for it, else just append data to the buffer. Applied on next self.draw call"""
-        assert len(data) % self.stride == 0
-        if name is not None: raise NotImplementedError
-        self.data.extend(data)
-        self.count += len(data) // self.stride
-        self.changed = True
-
-    def clear(self, name=None):
-        """Remove data associated with name, or if name is None, set count to 0. The buffer is kept until delete, to support faster rebuilding"""
-        if name is not None: raise NotImplementedError
-        self.data.clear()
-        self.count = 0
-
-    def draw(self, scale, offset):
-        glBindTexture(GL_TEXTURE_2D, SS.glyphAtlas.texture)
-        if self.changed: # upload buffer. NOTE: no mechanism shrinks the buffer if fewer quads are needed as before. same applies to quad buffer
-            data_c = (ctypes.c_float * (length:=self.count*self.stride))(*self.data[:length])
-            glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-            glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(data_c), data_c, GL_DYNAMIC_DRAW)
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            self.changed = False
-        texquadShader.use()
-        texquadShader.setUniform("scale", scale, "2f") # inverted y axis. from my view (0,0) is the top left corner, like in browsers
-        texquadShader.setUniform("offset", offset, "2f")
-        glBindVertexArray(self.VAO)
-        glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, self.count)
-    
-    def delete(self):
-        """Free OpenGL resources. Call before program exit"""
-        glDeleteBuffers(1, self.VBO)
-        glDeleteVertexArrays(1, self.VAO)
-
-TexQuadBuffer = _TexQuadBuffer()
-
-@dataclass
-class Segment:
-    name:str
-    start:int
-    length:int
-
-class _QuadBuffer:
-    """Buffer for untextured quad instances"""
-    def __init__(self):
-        """Create instance data buffer, vertex attribute array and instance variables"""
-        self.changed = False
-        self.data = [] # x, y, z, size w, h, color r, g, b, a
-        self.stride = 9
-        self.segments:List[Segment] = []
-
-        stride_c = self.stride * ctypes.sizeof(ctypes.c_float)
-
-        self.VAO = ctypes.c_uint()
-        glGenVertexArrays(1, ctypes.byref(self.VAO))
-        glBindVertexArray(self.VAO)
-        glBindBuffer(GL_ARRAY_BUFFER, BaseQuad.VBO)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, BaseQuad.EBO)
-        
-        # base quad data attributes: vertex position (loc 0), texture position (loc 1)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(0))
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * ctypes.sizeof(ctypes.c_float), ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(1)
-
-        self.VBO = ctypes.c_uint() # instance buffer
-        glGenBuffers(1, ctypes.byref(self.VBO))
-        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-
-        # Instanced attributes (locations 2+; divisor=1 for per-instance)
-        # pos (loc 2)
-        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride_c, ctypes.c_void_p(0))
-        glEnableVertexAttribArray(2)
-        glVertexAttribDivisor(2, 1)
-        # size (loc 3)
-        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride_c, ctypes.c_void_p(3*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(3)
-        glVertexAttribDivisor(3, 1)
-        # color (loc 4)
-        glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, stride_c, ctypes.c_void_p(5*ctypes.sizeof(ctypes.c_float)))
-        glEnableVertexAttribArray(4)
-        glVertexAttribDivisor(4, 1)
-
-        glUnbindBuffers()
-
-    @property
-    def count(self): return sum((s.length for s in self.segments)) // self.stride
-
-    def add(self, data, name=None):
-        """If name is provided, add to its section and update position and length for it, else just append data to the buffer. Applied on next self.draw call"""
-        assert len(data) % self.stride == 0
-        if name is None: name = "generic"
-        if (segment:=list(filter(lambda s: s.name == name, self.segments))) == []:
-            if self.segments: self.segments.append(Segment(name, self.segments[-1].start + self.segments[-1].length, len(data)))
-            else: self.segments.append(Segment(name, 0, len(data)))
-            self.data.extend(data)
-        else:
-            segment = segment[0]
-            for s in self.segments:
-                if s.start > segment.start: s.start += len(data)
-            self.data = self.data[:segment.start + segment.length] + data + self.data[segment.start + segment.length:]
-            segment.length += len(data)
-        self.changed = True
-    
-    def replace(self, data, name):
-        if (segment:=list(filter(lambda s: s.name == name, self.segments))) == []: self.add(data, name)
-        else: 
-            segment = segment[0]
-            shift = len(data) - segment.length
-            if shift != 0:
-                for s in self.segments:
-                    if s is not segment and s.start >= segment.start: s.start += shift
-            self.data[segment.start:segment.start+segment.length] = data
-            segment.length = len(data)
-            self.changed = True
-
-    def clear(self, name=None):
-        """Remove data associated with name, or if name is None, set count to 0. The buffer is kept until delete, to support faster rebuilding"""
-        if name is not None: raise NotImplementedError
-        self.data.clear()
-        self.segments.clear()
-
-    def draw(self, scale, offset):
-        if self.changed: # upload buffer
-            data_c = (ctypes.c_float * (length:=self.count*self.stride))(*self.data[:length])
-            glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
-            glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(data_c), data_c, GL_DYNAMIC_DRAW)
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            self.changed = False
-        quadShader.use()
-        quadShader.setUniform("scale", scale, "2f") # inverted y axis. from my view (0,0) is the top left corner, like in browsers
-        quadShader.setUniform("offset", offset, "2f")
-        glBindVertexArray(self.VAO)
-        glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, self.count)
-
-    def delete(self):
-        """Free OpenGL resources. Call before program exit"""
-        glDeleteBuffers(1, self.VBO)
-        glDeleteVertexArrays(1, self.VAO)
-
-QuadBuffer = _QuadBuffer()
-
-texquadShader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/texquad.vert", p.parent / "texquad.frag", ["glyphAtlas", "scale", "offset"])
-texquadShader.setUniform("glyphAtlas", 0, "1i")  # 0 means GL_TEXTURE0)
-quadShader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/quad.vert", p.parent / "quad.frag", ["scale", "offset"])
+glActiveTexture(GL_TEXTURE0)
+glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+glEnable(GL_BLEND)
+glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
 glEnable(GL_DEPTH_TEST)
 glClearDepth(1)
 glClearColor(0, 0, 0, 1)
 
 TEXTPATH.touch()
+glfwSetWindowTitle(window, TEXTPATH.name.encode())
 with open(TEXTPATH, "r") as f: markdown = parse(t:=f.read())
 with open(CSSPATH, "r") as f: SS.css, SS.fonts = parseCSS(f.read())
 default_css = {
@@ -829,17 +648,12 @@ for rule, declarations in default_css.items():
 frame = Node(K.FRAME, SCENE, [markdown], text=t, editnodes=set(), wraps=[], edit=False)
 markdown.parent = frame
 
-# TODO: load dynamically when used
+# load fonts TODO: load dynamically when used
 for font in SS.fonts:
     assert font["format"] == "truetype"
     font["Font"] = Font(Path(CSSPATH).parent.joinpath(font["url"]).resolve())
 
-# t0 = time.time()
 populate_render_data(frame, SS.css, reset=True)
-# print(f"{time.time() - t0:.3f}")
-
-from spiritstream.tree import serialize
-with open("./out.html", "w") as f: f.write(serialize(frame, CSSPATH))
 
 frame.cursor = Cursor(frame, idx=CURSORIDX, up=CURSORUP) # after rendertree so it can find line elements in the tree
 SCENE.children = [frame]
@@ -847,40 +661,214 @@ SCENE.children = [frame]
 # show(SS)
 
 while not glfwWindowShouldClose(window):
-    if glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS: glfwSetWindowShouldClose(window, GLFW_TRUE)
+    # HACK: necessary to actually get multiple events if they accumulated (X11?)
+    prevsize = -1
+
+    while len(SS.edit_queue) > prevsize:
+        prevsize = len(SS.edit_queue)
+        for i in range(20):
+            glfwPollEvents()
+            time.sleep(0.0001)
+    edit_queue = SS.edit_queue.copy()
+    SS.edit_queue.clear()
+
+    cursor = frame.cursor.idx
+    up = frame.cursor.idx == frame.cursor.node.end
+    cursor_selection = frame.cursor.selection.copy()
+    clipboard = c.decode() if (c:=glfwGetClipboardString(window)) else ""
+    if edit_queue:
+        reparse = False
+        for name, *data in edit_queue:
+            if name == "write":
+                if cursor_selection:
+                    frame.text = frame.text[:cursor_selection.start] + data[0] + frame.text[cursor_selection.end:]
+                    cursor = cursor_selection.start + len(data[0])
+                    cursor_selection.reset()
+                else:
+                    frame.text = frame.text[:cursor] + data[0] + frame.text[cursor:]
+                    cursor += len(data[0])
+                reparse = True
+            elif name == "erase_left":
+                if cursor_selection:
+                    frame.text = frame.text[:cursor_selection.start] + frame.text[cursor_selection.end:]
+                    cursor = cursor_selection.start
+                    cursor_selection.reset()
+                else:
+                    frame.text = frame.text[:max(0, cursor-data[0])] + frame.text[cursor:]
+                    cursor = max(0, cursor - data[0])
+                reparse = True
+            elif name == "erase_right":
+                if cursor_selection:
+                    frame.text = frame.text[:cursor_selection.start] + frame.text[cursor_selection.end:]
+                    cursor = cursor_selection.start
+                    cursor_selection.reset()
+                else: frame.text = frame.text[:cursor] + frame.text[cursor+data[0]:]
+                reparse = True
+            # CURSOR
+            # must rerender because who knows where the new position is in the text
+            elif name.startswith("cursor_pos"):
+                _, _, selection, x, y = name.split("_")
+                selection, x, y = selection == "True", float(x), float(y)
+                if reparse: text_update(frame); reparse = False
+                frame.cursor.update(vec2(x,y), selection=selection)
+                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
+            elif name == "select_all":
+                cursor_selection = Selection(0, False, len(frame.text), False)
+                cursor = len(frame.text)
+            # START END
+            elif name.startswith("start"):
+                selection = name.split("_")[1] == "True"
+                if reparse: text_update(frame); reparse = False
+                frame.cursor.move("start", selection=selection)
+                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
+            elif name.startswith("end"):
+                selection = name.split("_")[1] == "True"
+                if reparse: text_update(frame); reparse = False
+                frame.cursor.move("end", selection=selection)
+                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
+            # CURSOR DIRECTIONS
+            elif name.startswith("cursor_up"):
+                selection = name.split("_")[2] == "True"
+                for i in range(data[0]):
+                    if reparse:
+                        text_update(frame); reparse = False
+                    frame.cursor.move("up", selection=selection)
+                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
+            elif name.startswith("cursor_right"):
+                selection = name.split("_")[2] == "True"
+                if selection:
+                    if cursor_selection: cursor_selection.i1 = min(len(frame.text), cursor+data[0])
+                    else: cursor_selection = Selection(cursor, False, min(len(frame.text), cursor+data[0]), False)
+                    if (p:=min(len(frame.text), cursor+data[0])) in frame.wraps: up = True
+                    cursor = p
+                else:
+                    if cursor_selection:
+                        cursor = cursor_selection.end
+                        cursor_selection.reset()
+                    else:
+                        if (p:=min(len(frame.text), cursor+data[0])) in frame.wraps: up = True
+                        cursor = p
+            elif name.startswith("cursor_down"):
+                selection = name.split("_")[2] == "True"
+                for i in range(data[0]):
+                    if reparse:
+                        text_update(frame); reparse = False
+                    frame.cursor.move("down", selection=selection)
+                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
+            elif name.startswith("cursor_left"):
+                selection = name.split("_")[2] == "True"
+                if selection:
+                    if cursor_selection: cursor_selection.i1 = max(0, cursor-data[0])
+                    else: cursor_selection = Selection(cursor, False, max(0, cursor-data[0]), False)
+                    cursor = max(0, cursor-data[0])
+                else:
+                    if cursor_selection:
+                        cursor = cursor_selection.start
+                        cursor_selection.reset()
+                    else: cursor = max(0, cursor-data[0])
+            # COPY CUT PASTE
+            elif name == "copy":
+                if cursor_selection: clipboard = frame.text[cursor_selection.start:cursor_selection.end]
+            elif name == "cut":
+                if cursor_selection:
+                    clipboard = frame.text[cursor_selection.start:cursor_selection.end]
+                    frame.text = frame.text[:cursor_selection.start] + frame.text[cursor_selection.end:]
+                    cursor = cursor_selection.start
+                    cursor_selection.reset()
+                reparse = True
+            elif name == "paste":
+                if cursor_selection:
+                    frame.text = frame.text[:cursor_selection.start] + clipboard + frame.text[cursor_selection.end:]
+                    cursor = cursor_selection.start + len(clipboard)
+                    cursor_selection.reset()
+                else:
+                    frame.text = frame.text[:cursor] + clipboard + frame.text[cursor:]
+                    cursor += len(clipboard)
+                reparse = True
+            # LINK
+            elif name == "open_link":
+                n = frame.cursor._find(frame, cursor)
+                while n.k in [K.LINE, K.TEXT]: n = n.parent
+                if n.k is K.A:
+                    href = frame.text[n.href[0]:n.href[1]]
+                    if not href.startswith(("https://", "http://")):
+                        hashidx = href.rfind("#")
+                        if hashidx == -1: path, heading = href, ""
+                        else: path, heading = href[:hashidx], href[hashidx+1:]
+                        href = TEXTPATH.parent.joinpath(path).resolve() if path != "" else TEXTPATH.resolve()
+                        if not (p:=Path(href)).is_absolute():
+                            try: p = TEXTPATH.parent.joinpath(p).resolve()
+                            except: continue
+                        if p.exists():
+                            if p.as_posix() != TEXTPATH.as_posix():
+                                TEXTPATH = p
+                                try:
+                                    with open(p, "r") as f: frame.text = f.read()
+                                except:
+                                    frame.text = f"Unable to load file {p.as_posix()}"
+                                    TEXTPATH = Path("")
+                                SCENE.y = 0
+                                cursor = 0
+                                text_update(frame)
+                                glfwSetWindowTitle(window, TEXTPATH.name.encode())
+                            if heading:
+                                heading = sluggify(heading)
+                                for n in walk(frame):
+                                    if n.k is K.TEXT and n.parent.k in [K.H1,K.H2,K.H3,K.H4,K.H5,K.H6] and sluggify(frame.text[n.start:n.end]) == heading:
+                                        SCENE.y, cursor = -n.y, n.start
+                                        break
+                        else: print(f"INVALID LINK: Target does not exist: {p}")
+            # META
+            elif name == "close": glfwSetWindowShouldClose(window, GLFW_TRUE)
+            elif name == "export":
+                with open(TEXTPATH.parent.joinpath(f"{TEXTPATH.stem}.html").resolve(), "w") as f: f.write(serialize(frame, Path(CSSPATH), TEXTPATH))
+            elif name == "save":
+                with open(TEXTPATH, "w") as f: f.write(frame.text)
+                glfwSetWindowTitle(window, TEXTPATH.name.encode())
+            else: raise NotImplementedError(name, *data)
+            if name.startswith(("cursor_left", "erase_left")): up = False
+            
+        if reparse: text_update(frame)
+        frame.cursor.selection = cursor_selection.copy()
+        frame.cursor.update(cursor, selection=bool(cursor_selection), up=up)
+        if clipboard: glfwSetClipboardString(window, clipboard.encode()) # copy
 
     if SS.resized:
         SCENE.x = max(0, (SS.w - frame.w)/2)
         SS.resized = False
         glViewport(0, 0, SS.w, SS.h)
         populate_render_data(frame, SS.css, reset=True)
-        frame.cursor.update(frame.cursor.idx, up=frame.cursor.idx==frame.cursor.node.end, selection=frame.cursor.selection)
+        frame.cursor.update(frame.cursor.idx, up=up)
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
     scale, offset = (2 / SS.w, -2 / SS.h), tuple(vec2(-1 + SCENE.x * 2 / SS.w, 1 + SCENE.y * -2 / SS.h).components())
 
-    QuadBuffer.draw(scale, offset)
-    TexQuadBuffer.draw(scale, offset)
+    SS.quad_buffer_bg.draw(scale, offset)
+    SS.quad_buffer_cursor.draw(scale, offset)
+    SS.quad_buffer_selection.draw(scale, offset)
+
+    SS.glyph_buffer.draw(scale, offset)
+    for b in SS.img_buffers: b.draw(scale, offset)
     
     if (error:=glGetError()) != GL_NO_ERROR: print(f"OpenGL Error: {hex(error)}")
 
     glfwSwapBuffers(window)
-    glfwWaitEvents()
 
 with open(WORKSPACEPATH, "w") as f: json.dump({"textpath": TEXTPATH.as_posix(), "sceney": SCENE.y, "cursoridx":frame.cursor.idx,
                                                "cursorup": frame.cursor.idx == frame.cursor.node.end}, f)
 
-if SAVE_GLYPHATLAS:
-    from spiritstream.image import Image
-    Image.write(list(reversed(SS.glyphAtlas.bitmap)), Path(__file__).parent / "GlyphAtlas.bmp")
+if SAVE_GLYPHATLAS: Image.write(list(reversed(SS.glyphAtlas.bitmap)), Path(__file__).parent / "GlyphAtlas.bmp")
 
 if CACHE_GLYPHATLAS:
     with open(atlaspath, "wb") as f: pickle.dump(SS.glyphAtlas, f)
 
-BaseQuad.delete()
-QuadBuffer.delete()
-TexQuadBuffer.delete()
-texquadShader.delete()
-quadShader.delete()
+SS.base_quad.delete()
+SS.quad_buffer_bg.delete()
+SS.quad_buffer_cursor.delete()
+SS.quad_buffer_selection.delete()
+SS.glyph_buffer.delete()
+for i in SS.img_cache.values(): i["buffer"].delete()
+glyph_shader.delete()
+quad_shader.delete()
 glfwTerminate()

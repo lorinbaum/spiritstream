@@ -30,9 +30,7 @@ class TextureAtlas:
     def _texture_setup(self):
         """Exists separately to initalize the OpenGL texture after loading a TextureAtlas from .pkl"""
         self.texture = ctypes.c_uint()
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glGenTextures(1, ctypes.byref(self.texture))
-        glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.texture)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
@@ -40,8 +38,6 @@ class TextureAtlas:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         flatex = fully_flatten(self.bitmap)
         glTexImage2D(GL_TEXTURE_2D, 0, self.fmt, self.size, self.size, 0, self.fmt, GL_UNSIGNED_BYTE, (ctypes.c_ubyte * len(flatex))(*flatex))
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glBindTexture(GL_TEXTURE_2D, 0)
 
     def add(self, id:str, bitmap:List[float]):
@@ -70,7 +66,7 @@ class TextureAtlas:
             if width_left > 0 or max_y + h > self.size: continue
             if pos is None or max_y < pos[2] or (max_y == pos[2] and x < pos[1]): pos = (i, x, max_y)
         if pos is None:
-            from spiritstream.image import Image
+            import spiritstream.image as Image
             from pathlib import Path
             p = Path(__file__).parent.parent / "GlyphAtlas.bmp"
             Image.write(list(reversed(self.bitmap)), p)

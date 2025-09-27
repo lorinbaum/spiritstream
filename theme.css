@@ -76,3 +76,7 @@ hr {
   color: #e38864;
   height: 1px;
 }
+
+img {
+  max-width: 100%;
+}

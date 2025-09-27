@@ -2,7 +2,8 @@ from enum import Enum, auto
 from dataclasses import dataclass
 from typing import List, Optional, Union, Generator, Any, Iterable, Dict, Tuple
 from spiritstream.helpers import SPACES
-import re
+from pathlib import Path
+import re, os, time
 
 PATTERN = re.compile("|".join([
     r"^(?P<empty_line>[\s]*?\n|\Z)",
@@ -30,10 +31,10 @@ PATTERN = re.compile("|".join([
     r"(?P<strikethrough_start>(?<!\\)~~(?=[^~\s]))",
     r"(?P<strikethrough_end>(?<![~\s\\])~~)",
 
-    r"(?P<wikilink_embed_start>(?<!\\)!\[\[(?=[^\[]))",
-    r"(?P<wikilink_start>(?<!\\)\[\[(?=[^\[]))",
-    r"(?P<markdownlink_embed_start>(?<!\\)!\[(?=[^\[]))",
-    r"(?P<markdownlink_start>(?<!\\)\[)",
+    r"(?P<wikilink_embed_start>(?<!\\)!\[\[(?=[^\[\]]))",
+    r"(?P<wikilink_start>(?<!\\)\[\[(?=[^\[\]]))", # prevent wikilinks like [[]link]], but guarantees that the link is not empty
+    r"(?P<markdownlink_embed_start>(?<!\\)!\[(?=[^\[\]]))",
+    r"(?P<markdownlink_start>(?<!\\)\[(?=[^\]]))",
     r"(?P<markdownlink_switch>(?<!\\)\]\()",
     r"(?P<wikilink_end>(?<![\\\]])\]\])",
 
@@ -42,8 +43,6 @@ PATTERN = re.compile("|".join([
 
     r"(?P<double_inline_code>(?<![`\\])``(?=[^`]))",
     r"(?P<inline_code>(?<![\\])`(?=[^`]))", # no negative lookbehind for another ` because that would already have matched with double_inline_code
-
-    r"(?P<text>[\s\S]+?)"
 ]), re.MULTILINE)
 
 BLOCK_TOKENS = ["heading", "blockquote_line", "paragraph_line", "horizontal_rule", "codeblock", "empty_line", "listitem", "endoffile"]
@@ -83,6 +82,8 @@ LINKS = {K.A, K.IMG}
 class Node:
     def __init__(self, k:K, parent:"Node", children:List["Node"]=None, data:Dict=None, **kwargs):
         self.k, self.parent = k, parent
+        if children: # for easier notation when creating nested stuff
+            for c in children: c.parent = self
         self.children = children if children is not None else []
         self.data = data if data is not None else {}
         self.data.update(kwargs)
@@ -106,8 +107,10 @@ class Node:
     def __repr__(self): return  f"\033[32m{self.k.name}\033[0m("+", ".join([f"\033[94m{k}=\033[0m{self._format(v)}" for k,v in self.data.items()]) + ")"
 
 def tokenize(text:str) -> Generator[Token, None, None]:
-    text_start = None # because the non-greedy pattern matches single characters, accumulates "text" matches and stores start and end.
+    i = 0
     for m in PATTERN.finditer(text):
+        if m.start() > i: yield Token("text", i, m.start())
+        i = m.end()
         for name, value in m.groupdict().items():
             if value is not None:
                 match name:
@@ -130,12 +133,10 @@ def tokenize(text:str) -> Generator[Token, None, None]:
                         digit = int(t.strip("\t .)")) if listtype == K.OL else None
                         data = (indent, listtype, digit)
                     case "blockquote_line": data = m.group("blockquote_line").count(">")
-                    case "text" if text_start is None: text_start = m.start()
                     case _: data = None
-                if name != "text":
-                    if text_start is not None: yield Token("text", text_start, m.start()); text_start = None
-                    yield Token(name, m.start(), m.end(), data)
-    if text_start is not None: yield Token("text", text_start, len(text))
+                yield Token(name, m.start(), m.end(), data)
+                break
+    if i < len(text): yield Token("text", i, len(text))
     yield Token("endoffile", len(text), len(text)+1) # HACK: cursor positioning will look for nodes with start <= idx < end so last node ends 1 beyond
 
 def treeify(tokens:Iterable[Token], head=None) -> Node:
@@ -209,6 +210,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
             case "wikilink_end" if node.k in LINKS:
                 if node.linktype == "wiki":
                     if node.children: node.href = (node.children[0].start, node.children[-1].end)
+                    if node.k is K.IMG: node.children = []
                     node = end_node(node, tok.end)
                 else: node.linktype = "md switch" # this token can end markdownlinks too. data is used when parsing next token to see if conditions for a full switch are satisfied
             case "markdownlink_embed_start" if node.k not in LINKS: node = start_node(Node(K.IMG, node, start = tok.start, linktype = "md"))
@@ -226,7 +228,10 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
             case "opening_parenthesis" if node.k in LINKS and node.linktype == "md switch": node.linktype, node.switchidx = "md switched", len(node.children)
             case "closing_parenthesis" if node.k in LINKS and node.linktype == "md switched":
                 node.href = None if len(node.children) == node.switchidx else (node.children[node.switchidx].start, node.children[-1].end)
-                node.children = node.children[:node.switchidx] # remove children that were part of the link
+                if node.k is K.A: node.children = node.children[:node.switchidx] # remove children that were part of the link
+                else:
+                    node.alt = (node.children[0].start, node.children[0].end)
+                    node.children = []
                 node = end_node(node, tok.end)
 
             # NOTE: check Node kind because text will match newline at end of empty_line and codeblock which is useless
@@ -311,6 +316,9 @@ def steal_children(parent:Node, thief:Node):
         c.parent = thief
         thief.children.append(c)
 
+def parents(node:Node):
+    while node.parent: yield (node:=node.parent)
+
 def walk(node, level=None, seen=None) -> Generator[Node, None, None]:
     assert id(node) not in (seen := set() if seen is None else seen) or seen.add(id(node))
     yield node if level is None else (node, level)
@@ -321,11 +329,14 @@ def show(node): [print(f"{' '*SPACES*l}{n}") for n,l in walk(node, level=0)]
 def find(node, **kwargs) -> Node: return next((n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))))
 def find_all(node, **kwargs) -> List[Node]: return [n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))]
 
-def serialize(head:Node, csspath:str) -> str:
+def serialize(head:Node, csspath:Path, basepath:Path) -> str:
     """node tree to html"""
-    ret = f"""<!DOCTYPE html><html><head><link rel="stylesheet" href="{csspath}"/><title>{head.title if head.title else "Unnamed frame"}</title></head>"""
+    ret = f"""<!DOCTYPE html><html><head><link rel="stylesheet" href="{os.path.relpath(str(csspath.resolve()), str(basepath.parent.resolve()))}"/>\
+<title>{head.title if head.title else "Unnamed frame"}</title></head>"""
     assert head.k is K.FRAME
     text = head.text
+    for n in walk(head) :
+        if n.k is K.TEXT and n.parent.k in [K.H1,K.H2,K.H3,K.H4,K.H5,K.H6]: n.parent.data.setdefault("ids", []).append(sluggify(text[n.start:n.end]))
     prevNode, prevLevel = None, -1
     for node, level in walk(head, level=0):
         if node.k not in [K.LINE, K.FRAME]:
@@ -335,12 +346,12 @@ def serialize(head:Node, csspath:str) -> str:
                 assert prevNode.parent is not None
                 prevNode, prevLevel = prevNode.parent, prevLevel - 1
             if node.k is K.TEXT:
-                if node is node.parent.children[-1] and node.parent.k not in INLINE_NODES and text[node.start:node.end] != "\n":
+                if node is node.parent.children[-1] and node.parent.k not in [*INLINE_NODES, K.EMPTY_LINE, K.HR]:# and text[node.start:node.end] != "\n":
                     # rstrip reduce excessive <br> tags
                     ret += text[node.start:node.end].rstrip("\n").replace("\n", "<br>")
                 else: ret += text[node.start:node.end].replace("\n", "<br>")
             else:
-                ret += htmltag(node, text)
+                ret += htmltag(node, text, basepath=basepath)
                 prevNode = node
                 prevLevel = level
     while prevNode is not head:
@@ -348,13 +359,26 @@ def serialize(head:Node, csspath:str) -> str:
         prevNode = prevNode.parent
     return ret + "</html>"
 
-def htmltag(node:Node, text, open=True) -> str:
-    # TODO: other special kinds, like links, codeblocks, inline code
+def htmltag(node:Node, text, open=True, basepath:Path=None) -> str:
+    ret = ""
     match node.k:
-        case K.EMPTY_LINE: return ""
-        case K.A: return f"<a href=\"{text[node.href[0]:node.href[1]]}\">" if open else "</a>"
-        case K.HR: return "<hr>" if open else ""
-        case _: return f"""<{'' if open else '/'}{node.k.name.lower()}{' class="' + ' '.join(node.cls) + '"' if node.cls else ''}>"""
+        case K.EMPTY_LINE: pass
+        case K.A:
+            if open and not (href:=text[node.href[0]:node.href[1]]).startswith(("http://", "https://")):
+                hashidx = href.rfind("#")
+                if hashidx == -1: path, heading = href, ""
+                else: path, heading = href[:hashidx], href[hashidx+1:]
+                href = basepath.parent.joinpath(path).resolve() if path != "" else basepath.resolve()
+                if href.suffix == ".md": href = href.parent.joinpath(f"{href.stem}.html")
+                href = str(href.as_posix()) + f"#{sluggify(heading)}"
+            ret += f"<a href=\"{href}\"" if open else "</a>"
+        case K.IMG: ret += f"<img src=\"{basepath.parent.joinpath(text[node.href[0]:node.href[1]]).resolve()}\" />" if open else ""
+        case K.HR: ret += "<hr>" if open else ""
+        case _: ret += f"<{''if open else '/'}{node.k.name.lower()}{'' if open else '>'}"
+    return ret if ret.endswith(">") or not open or ret == "" else ret + f"""{' class="' + ' '.join(node.cls) + '"' if node.cls else ''}\
+{' id="' + ' '.join(node.ids) + '"' if node.ids else ''}>"""
+
+def sluggify(s:str) -> str: return re.sub(r'[^a-zA-Z0-9_]+', '-', s.lower().strip())
 
 CSS_PATTERN = re.compile("|".join([
     r"(?P<comment>/\*.*?\*/)",

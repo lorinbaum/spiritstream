@@ -3,7 +3,7 @@ from pathlib import Path
 
 # reference: https://www.glfw.org/docs/latest/topics.html
 
-glfw = ctypes.CDLL(Path(__file__).resolve().parent / "libglfw.so.3.4")
+glfw = ctypes.CDLL(Path(__file__).resolve().parent / "build/libglfw.so")
 
 def glfwfunc(name, restype, argtypes):
     f = getattr(glfw, name)
@@ -358,6 +358,7 @@ GLFWcursorposfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_double, ctypes.c_
 GLFWscrollfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_double, ctypes.c_double)
 
 glfwInit = glfwfunc("glfwInit", ctypes.c_int, [])
+glfwSetWindowTitle = glfwfunc("glfwSetWindowTitle", None, [GLFWwindow, ctypes.c_char_p])
 glfwWindowHint = glfwfunc("glfwWindowHint", None, [ctypes.c_int, ctypes.c_int])
 glfwCreateWindow = glfwfunc("glfwCreateWindow", GLFWwindow, [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, GLFWmonitor, GLFWwindow])
 glfwWindowShouldClose = glfwfunc("glfwWindowShouldClose", ctypes.c_int, [GLFWwindow])
