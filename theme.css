@@ -1,4 +1,15 @@
 @font-face {
+  font-family: "Fira Sans";
+  src: url("./assets/fonts/Fira_Sans/FiraSans-Regular.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Fira Sans";
+  src: url("./assets/fonts/Fira_Sans/FiraSans-Bold.ttf") format("truetype");
+  font-weight: 700;
+}
+
+@font-face {
   font-family: "Fira Code";
   src: url("./assets/fonts/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf") format("truetype");
 }
@@ -18,14 +29,17 @@
 
 body {
   line-height: 1.5;
-  font-family: "Fira Code";
+  font-family: "Fira Sans";
   font-size: 16px;
   color: #e38864;
   margin: auto;
   width: 500px;
   background-color: black;
-  white-space: break-spaces; /* ensures exact rendering in browser, which typically collpases 2+ spaces and trailing spaces.*/
-  font-synthesis: none; /* for WYSIWYG because spiritstream doesn't support font-synthesis yet*/
+  
+  /* for WYSIWYG because spiritstream doesn't support these yet yet*/
+  white-space: break-spaces;
+  font-synthesis: none; 
+  font-kerning: none;
 }
 
 p.code_language {
@@ -51,6 +65,7 @@ code.block {
 
 code {
   color: #fac7a8;
+  font-family: "Fira Code";
 }
 
 h1, h2, h3, h4, h5, h6 {

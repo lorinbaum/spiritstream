@@ -56,7 +56,10 @@ class Buffer:
         self.count = 0
 
     def draw(self, scale, offset):
-        if hasattr(self, "texture"): glBindTexture(GL_TEXTURE_2D, self.texture)
+        if hasattr(self, "texture"):
+            glBindTexture(GL_TEXTURE_2D, self.texture)
+            glDisable(GL_DEPTH_TEST)
+            glDepthMask(GL_FALSE)  # Prevent writing to the depth buffer
         if self.changed: # upload buffer. NOTE: no mechanism shrinks the buffer if fewer quads are needed as before. same applies to quad buffer
             data_c = (ctypes.c_float * (length:=self.count*self.stride))(*self.data[:length])
             glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
@@ -68,6 +71,9 @@ class Buffer:
         self.shader.setUniform("offset", offset, "2f")
         glBindVertexArray(self.VAO)
         glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0, self.count)
+        if hasattr(self, "texture"):
+            glEnable(GL_DEPTH_TEST)
+            glDepthMask(GL_TRUE)
         glBindVertexArray(0)
     
     def delete(self):

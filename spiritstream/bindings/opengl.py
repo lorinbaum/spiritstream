@@ -26,6 +26,7 @@ GL_COMPILE_STATUS = 0x8B81
 GL_LINK_STATUS = 0x8B82
 GL_FLOAT = 0x1406
 GL_FALSE = 0
+GL_TRUE = 1
 GL_TRIANGLES = 0x0004
 GL_NO_ERROR = 0
 GL_ELEMENT_ARRAY_BUFFER = 0x8893
@@ -86,6 +87,7 @@ glVertexAttribDivisor = glfunc("glVertexAttribDivisor", None, [ctypes.c_uint, ct
 glDrawElementsInstanced = glfunc("glDrawElementsInstanced", None, [ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_int])
 
 glClearDepth = glfunc("glClearDepth", None, [ctypes.c_double])
+glDepthMask = glfunc("glDepthMask", None, [ctypes.c_bool])
 
 glGenTextures = glfunc("glGenTextures", None, [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)])
 glBindTexture = glfunc("glBindTexture", None, [ctypes.c_uint, ctypes.c_uint])
@@ -97,6 +99,7 @@ glUniform1i = glfunc("glUniform1i", None, [ctypes.c_int, ctypes.c_int])
 glUniform2f = glfunc("glUniform2f", None, [ctypes.c_int, ctypes.c_float, ctypes.c_float])
 glUniform3f = glfunc("glUniform3f", None, [ctypes.c_int, ctypes.c_float, ctypes.c_float, ctypes.c_float])
 glEnable = glfunc("glEnable", None, [ctypes.c_uint])
+glDisable = glfunc("glDisable", None, [ctypes.c_uint])
 glBlendFunc = glfunc("glBlendFunc", None, [ctypes.c_uint, ctypes.c_uint])
 glPixelStorei = glfunc("glPixelStorei", None, [ctypes.c_uint, ctypes.c_int])
 

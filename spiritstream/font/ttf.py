@@ -167,6 +167,10 @@ class TTF:
         for ep in g.endPtsContours:
             new_contour = []
             contour = pts[start:ep+1]
+            if contour[0].onCurve is False: # contour must start and end with onCurve for proper segment extraction in rasterization
+                if contour[1].onCurve is False:
+                    contour.insert(1, CurvePoint(contour[0].x+(contour[1].x-contour[0].x)/2, contour[0].y+(contour[1].y-contour[0].y)/2, True))
+                contour = contour[1:] + [contour[0]] # rotate by one, so it starts with onCurve
             for p1, p2 in zip(contour, contour[1:] + [contour[0]]):
                 new_contour.append(p1)
                 # add another point inbetween. if two consecutive offcurve points, add an oncurve one to keep the curves quadratic. if two oncurve ones, add one so the segments are always 3 points: easy to handle.
@@ -175,6 +179,7 @@ class TTF:
             new_contour.append(contour[0])
             assert len(new_contour) % 2 == 1
             all_contours.append(new_contour)
+        assert not any([p1.onCurve is False and p2.onCurve is False for contour in all_contours for p1,p2 in zip(contour, contour[1:] + [contour[0]])])
         bitmap, size = rasterize(all_contours, self.antialiasing)
         return bitmap
 
@@ -194,34 +199,33 @@ def rasterize(contours: List[List[CurvePoint]], aa: int) -> Tuple[List[List[int]
     mx, MX, my, MY = math.floor(min(xs)), math.ceil(max(xs)), math.floor(min(ys)), math.ceil(max(ys))
     sx, sy = MX - mx, MY - my
     bmp = [[0]*sx for _ in range(sy)]
-    
+
     for row in range(sy):
         all_ints = []
         for aay in range(aa):
-            y = row + (aay + .5)/aa
+            y = row + (aay + .5)/aa + 1e-6  # Add small bias to avoid tangency artifacts
             ints = []
             for c in contours:
                 for i in range(0, len(c)-2, 2):
                     p0, p1, p2 = [vec2(pt.x, pt.y) for pt in c[i:i+3]]
-                    if all(p.y<y for p in (p0,p1,p2)) or all(p.y>y for p in (p0,p1,p2)): continue
+                    if all(p.y < y for p in (p0,p1,p2)) or all(p.y > y for p in (p0,p1,p2)): continue
                     a, b, cc = p0.y - 2*p1.y + p2.y, 2*(p1.y-p0.y), p0.y - y
-                    ts = [t for t in quadratic_equation(a,b,cc) if -1e-9<=t<=1+1e-9]
+                    ts = [t for t in quadratic_equation(a,b,cc) if -1e-9 <= t <= 1+1e-9]
                     for t in ts:
-                        t = max(0,min(1,t))
-                        x = (1-t)**2*p0.x + 2*(1-t)*t*p1.x + t**2*p2.x
-                        grad = vec2(2*(1-t)*(p1.x-p0.x)+2*t*(p2.x-p1.x),
-                                    2*(1-t)*(p1.y-p0.y)+2*t*(p2.y-p1.y))
-                        if abs(grad.y)<1e-12: continue
-                        wn = 1 if grad.y>0 else -1
-                        if not any(abs(ii.x-x)<1e-9 and ii.wn==wn for ii in ints): ints.append(Intersection(x,wn))
+                        t = max(0, min(1, t))
+                        x = (1-t)**2 * p0.x + 2*(1-t)*t * p1.x + t**2 * p2.x
+                        grad = vec2(2*(1-t)*(p1.x-p0.x) + 2*t*(p2.x-p1.x), 2*(1-t)*(p1.y-p0.y) + 2*t*(p2.y-p1.y))
+                        if abs(grad.y) < 1e-6: wn = 0
+                        else: wn = 1 if grad.y > 0 else -1
+                        if not any(abs(ii.x - x) < 1e-6 and ii.wn == wn for ii in ints): ints.append(Intersection(x, wn))
             all_ints.append(ints)
-        
+            
         for col in range(sx):
             v=0
             for aax in range(aa):
                 x = col + (aax+.5)/aa
                 for ints in all_ints:
-                    v += 1 if sum(i.wn for i in ints if i.x>=x) != 0 else 0
+                    v += 1 if sum(i.wn for i in ints if i.x>x+1e-6) != 0 else 0
             bmp[row][col] = int(v/(aa*aa)*255)
     return bmp, vec2(sx,sy)
 
