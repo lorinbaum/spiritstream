@@ -1,4 +1,4 @@
-import contextlib, os
+import contextlib, os, math
 from typing import ClassVar
 
 # context variable management from: https://github.com/tinygrad/tinygrad/blob/master/tinygrad/helpers.py
@@ -24,6 +24,10 @@ class ContextVar:
   def __ge__(self, x): return self.value >= x
   def __gt__(self, x): return self.value > x
   def __lt__(self, x): return self.value < x
+
+# Quadratic eq solver with tolerance
+def quadratic_equation(a, b, c): return [-c / b] if (aok:=abs(a) < 1e-12) and abs(b) > 1e-12 else ([] if aok else (
+    ([] if (d:=b*b-4*a*c)<0 else [(-b - math.sqrt(d)) / (2 * a), (-b + math.sqrt(d)) / (2 * a)])))
 
 SPACES = 4 # spaces per tab
 

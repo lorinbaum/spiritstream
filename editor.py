@@ -417,9 +417,9 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
                 descentpx = font.engine.hhea.descent * style["font-size"] / font.engine.head.unitsPerEM
                 total = ascentpx - descentpx
                 for l in lines:
-                    underline_pos = font.engine.fupx(font.engine.post.underlinePosition)
+                    underline_pos = font.engine.fupx(font.engine.post.underlinePosition, style["font-size"], 72)
                     underline_y = l.y + ascentpx + (style["line-height"] - total)/2 - underline_pos
-                    h = max(1, font.engine.fupx(font.engine.post.underlineThickness))
+                    h = max(1, font.engine.fupx(font.engine.post.underlineThickness, style["font-size"], 72))
                     SS.quad_buffer_bg.add([l.x, underline_y, 0.6, l.w, h, (c:=style["color"]).r, c.g, c.b, c.a])
             for l in lines:
                 l.parent = node
