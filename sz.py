@@ -13,7 +13,7 @@ if __name__ == "__main__":
         docstring = False
         for line in [l.strip() for l in t]:
             if line.startswith("\"\"\""):
-                if not line.endswith("\"\"\""): docstring = True 
+                docstring = not (line.endswith("\"\"\"") and (len(line) >= 6 or docstring))
                 continue
             if docstring and line.endswith("\"\"\""):
                 docstring = False
