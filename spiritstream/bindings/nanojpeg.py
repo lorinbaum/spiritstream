@@ -1,5 +1,6 @@
 import ctypes
 from pathlib import Path
+from enum import Enum
 
 nanojpg = ctypes.CDLL(Path(__file__).resolve().parent / "build/libnanojpeg.so")
 
@@ -8,7 +9,7 @@ def f(name, restype, argtypes):
     func.restype, func.argtypes = restype, argtypes
     return func
 
-class NJResult:
+class NJResult(Enum):
     OK = 0
     NO_JPEG = 1
     UNSUPPORTED = 2

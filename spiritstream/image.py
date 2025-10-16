@@ -79,11 +79,11 @@ def jpg_read(path):
     buf = ctypes.create_string_buffer(jpg)
 
     njInit()
-    res = njDecode(ctypes.cast(buf, ctypes.c_void_p), len(jpg))
+    res = NJResult(njDecode(ctypes.cast(buf, ctypes.c_void_p), len(jpg)))
 
     if res is not NJResult.OK:
         njDone()
-        raise RuntimeError
+        raise RuntimeError(res.name)
     else:
         width = njGetWidth()
         height = njGetHeight()
