@@ -1,5 +1,5 @@
 from pprint import pprint
-import math, time, pickle, functools, json, argparse
+import math, time, pickle, functools, json, argparse, shutil, os
 from enum import Enum, auto
 from typing import Union, List, Dict, Tuple
 from spiritstream.vec import vec2
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
 from spiritstream.helpers import CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
-from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children, parents, serialize, sluggify
+from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children, parents, serialize, sluggify, check
 from spiritstream.buffer import BaseQuad, QuadBuffer, TexQuadBuffer
 import spiritstream.image as Image
 
@@ -40,7 +40,7 @@ class Cursor:
         self.idx = idx
         self.pos:vec2
         self.x = None
-        self.node:Node
+        self.node:Node = None
         self.selection = Selection()
         
         self.update(idx, up=up)
@@ -49,6 +49,7 @@ class Cursor:
         if hasattr(node, "children"):
             if isinstance(pos, int):
                 for c in node.children:
+                    if c.end is None: show(c)
                     if (up and c.start < pos <= c.end) or (not up and c.start <= pos < c.end): return self._find(c, pos, up)
                 return node
             else:
@@ -86,7 +87,9 @@ class Cursor:
                 populate_render_data(self.frame, SS.css, reset=True)
                 self.update(pos if isinstance(pos, int) else node.start, allow_drift=allow_drift, selection=selection)
                 return
-            else: raise RuntimeError(f"Could not resolve position {pos} to LINE after enabling edit mode on {node}")
+            else:
+                show(node)
+                raise RuntimeError(f"Could not resolve position {pos} to LINE after enabling edit mode on {node}")
 
         self.node = node
 
@@ -198,7 +201,7 @@ class Cursor:
 
 def _in_edit_view(node:Node) -> bool: return _find_edit_parent(node).edit in [Edit.LOCAL, Edit.GLOBAL] or any((n.edit is Edit.GLOBAL for n in parents(node)))
  
-def _find_edit_parent(node:Node, idx=None) -> Node: return next((n for n in (node, *parents(node)) if n.k not in [K.LINE, K.TEXT, K.IMG]))
+def _find_edit_parent(node:Node, idx=None) -> Node: return next((n for n in (node, *parents(node)) if n.k not in INLINE_NODES or n.k is K.CODE and "block" in n.cls))
 
 @dataclass
 class Selection:
@@ -237,13 +240,14 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
     Returns
     - Node with LINE children to add to the node tree
     - Tex quad instance data for all glyphs
+    - List of indices where text wraps
     """
     font, fontweight = get_font(fontfamily, fontweight) # replace fontweight value with actual used based on what's available
     cx = x # character x offset
     linepos = vec2(x, y) # top left corner of line hitbox
     if newline_x is None: newline_x = x
     assert cx <= newline_x + width, (cx, newline_x, width)
-    lines, line_strings = Node(K.TEXT, None), [""]
+    lines, line_strings = [], [""]
     lstart = 0 # char index where line started
     xs = [] # cursor x positions
     wraps = [] # idx of wraps
@@ -251,7 +255,7 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
     for idx, c in enumerate(text):
         xs.append(cx)
         if c == "\n":
-            lines.children.append(Node(K.LINE, lines, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
+            lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
             cx, linepos, xs, lstart = newline_x, vec2(newline_x, linepos.y + lineheight), [], idx+1
             line_strings.append("")
             continue
@@ -260,14 +264,14 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
             wrap_idx = fwrap + 1 if (fwrap:=line_strings[-1].rfind(" ")) >= 0 else len(line_strings[-1])
             wraps.append(wrap_idx + start + lstart)
             if wrap_idx == len(line_strings[-1]): # no wrapping necessary, just cut off
-                lines.children.append(Node(K.LINE, lines, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start+idx, xs=xs))
+                lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start+idx, xs=xs))
                 cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
                 xs, lstart = [cx], idx
                 line_strings.append("")
             else:
                 line_strings.append(line_strings[-1][wrap_idx:])
                 line_strings[-2] = line_strings[-2][:wrap_idx]
-                lines.children.append(Node(K.LINE, lines, x=linepos.x, y=linepos.y, w=xs[wrap_idx] - linepos.x, h=lineheight, start=start+lstart,
+                lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=xs[wrap_idx] - linepos.x, h=lineheight, start=start+lstart,
                                 end=start+lstart+wrap_idx, xs=xs[:wrap_idx+1]))
                 xs, lstart = [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]], lstart + wrap_idx
                 cx, linepos = xs[-1], vec2(newline_x, linepos.y + lineheight)
@@ -277,9 +281,9 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
 
     xs.append(cx) # first position after the last character
     if line_strings[-1] != "" or text == "":
-        lines.children.append(Node(K.LINE, lines, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
+        lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
     if align in ["center", "right"]:
-        for c in lines.children:
+        for c in lines:
             shift = x+width-c.w-c.x / (2 if align == "center" else 1)
             c.x, c.xs = c.x + shift, [x0 + shift for x0 in c.xs]
 
@@ -287,7 +291,7 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
     ascentpx = font.engine.hhea.ascent * fontsize / font.engine.head.unitsPerEM
     descentpx = font.engine.hhea.descent * fontsize / font.engine.head.unitsPerEM
     total = ascentpx - descentpx
-    for s, l in zip(line_strings, lines.children):
+    for s, l in zip(line_strings, lines):
         for i, c in enumerate(s):
             g = font.glyph(c, fontsize, 72)
             if c != " ":
@@ -296,7 +300,7 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
                 instance_data += [l.xs[i] + g.bearing.x, l.y + ascentpx + (lineheight - total)/2 + (g.size.y - g.bearing.y), 0.5, # pos
                     g.size.x, -g.size.y, # size
                     *(SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, font.render(c, fontsize, 72))), # uv offset and size
-                    color.r, color.g, color.b, color.a] # color 
+                    color.r, color.g, color.b, color.a] # color
     return lines, instance_data, wraps
 
 class Edit(Enum): GLOBAL, LOCAL = auto(), auto() # GLOBAL affects gaps in all descendants, LOCAL affects only gaps in direct children, 
@@ -353,8 +357,16 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
         node.w = style.get("width", pstyle["_width"]) - style["margin-left"] - style["margin-right"]
         style["_width"] = node.w - style["padding-left"] - style["padding-right"]
         assert style["_width"] >= 0
-        node.x, node.y = pstyle["_block"].x + style["margin-left"], pstyle["_block"].y + max(style["margin-top"] - pstyle["_margin"].y, pstyle["_margin"].y)
+        node.x, node.y = pstyle["_block"].x + style["margin-left"], pstyle["_block"].y + max(style["margin-top"], pstyle["_margin"].y)
         style.update({"_block": (v:=vec2(node.x + style["padding-left"], node.y + style["padding-top"])), "_inline": v, "_margin": vec2(0,0)})
+        if node.k is K.LI and not edit_view:
+            y = node.y + style["font-size"] * 0.066666 # hack to approximate browser rendering. Shift without changing node.y for talled node.
+            if node.parent.k is K.UL:
+                typeset("•", style["_inline"].x - 1.25 * style["font-size"], y, style["font-size"], style["font-family"], style["font-size"]*1.4,
+                        style["font-weight"], style["color"], style["line-height"]*1.075, align="right", start=node.start)
+            elif node.parent.k is K.OL:
+                typeset(d:=f"{node.digit}.", style["_inline"].x-(len(d)+0.5)*style["font-size"], y, style["font-size"]*len(d), style["font-family"],
+                        style["font-size"]*1.05, style["font-weight"], style["color"], style["line-height"]*1.075, align="right", start=node.start)
     else:
         style["_width"] = pstyle["_width"]
         style["_margin"] = vec2(style["margin-right"], 0)
@@ -382,40 +394,36 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
             node.h = node.w / img["width"] * img["height"]
             img["buffer"].add([node.x, node.y, 0.5, node.w, node.h])
             SS.img_buffers.add(img["buffer"])
-            style["_block"] = vec2(pstyle["_block"].x, node.y + node.h)
 
             font, _ = get_font(style["font-family"], style["font-weight"])
             ascentpx = font.engine.hhea.ascent * style["font-size"] / font.engine.head.unitsPerEM
             descentpx = font.engine.hhea.descent * style["font-size"] / font.engine.head.unitsPerEM
             total = ascentpx - descentpx
             style["_inline"] = vec2(node.x + node.w, node.y + node.h - (style["line-height"] - total)/2 - ascentpx)
+            style["_block"] = vec2(pstyle["_block"].x, style["_inline"].y + style["line-height"])
 
-            return style["_block"], style["_inline"], vec2(style["margin-bottom"], 0) # early return because img never has children
-        if node.k is K.TEXT:
+            return style["_block"], style["_inline"], vec2(0, style["margin-bottom"]) # early return because img never has children
+        elif node.k is K.TEXT:
             y = node.y
             if node.parent.k is K.HR and not edit_view: SS.quad_buffer_bg.add([node.x, node.y, 0.6, style["_width"], 1, (c:=style["color"]).r, c.g, c.b, c.a])
-            if node.parent.k is K.LI and not edit_view:
-                if node.parent.parent.k is K.UL:
-                    y = node.y + style["font-size"] * 0.066666 # hack to approximate browser rendering. Shift without changing node.y for talled node.
-                    typeset("•", node.x - 1.25 * style["font-size"], y, style["font-size"], style["font-family"], style["font-size"]*1.4,
-                            style["font-weight"], style["color"], style["line-height"]*1.075, align="right", start=node.start)
-                elif node.parent.parent.k is K.OL:
-                    typeset(d:=f"{node.parent.digit}.", node.x-(len(d)+0.5)*style["font-size"], y, style["font-size"]*len(d), style["font-family"],
-                            style["font-size"]*1.05, style["font-weight"], style["color"], style["line-height"]*1.075, align="right", start=node.start)
             t = text[node.start:node.end].upper() if style.get("text-transform") == "uppercase" else text[node.start:node.end]
+            if node.end-node.start > len(t): t += "\n" # HACK: this only happens at file end and ensures that there is an additional cursor position at the end
             lines = typeset(t, node.x, y, style["_width"], style["font-family"], style["font-size"], style["font-weight"], style["color"], style["line-height"],
                             pstyle["_block"].x, start=node.start)
+            if lines == []: show(lines); print(t)
             if node.parent.k is K.A:
                 font, _ = get_font(style["font-family"], style["font-weight"])
                 ascentpx = font.engine.hhea.ascent * style["font-size"] / font.engine.head.unitsPerEM
                 descentpx = font.engine.hhea.descent * style["font-size"] / font.engine.head.unitsPerEM
                 total = ascentpx - descentpx
-                for l in lines.children:
+                for l in lines:
                     underline_pos = font.engine.fupx(font.engine.post.underlinePosition)
                     underline_y = l.y + ascentpx + (style["line-height"] - total)/2 - underline_pos
                     h = max(1, font.engine.fupx(font.engine.post.underlineThickness))
                     SS.quad_buffer_bg.add([l.x, underline_y, 0.6, l.w, h, (c:=style["color"]).r, c.g, c.b, c.a])
-            steal_children(lines, node)
+            for l in lines:
+                l.parent = node
+                node.children.append(l)
             c = node.children[-1]
             style["_block"] = vec2(pstyle["_block"].x, c.y + c.h)
             style["_inline"] = style["_block"].copy() if t.endswith("\n") else vec2(c.x + c.w, c.y)
@@ -434,11 +442,11 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
                     if i == 0 and node.start != child.start: start, end = node.start, child.start
                     elif i > 0 and node.children[i-1].end != child.start: start, end = node.children[i-1].end, child.start
                     if start is not None:
-                        if child.k not in INLINE_NODES: for_children["_inline"].x = pstyle["_block"].x
+                        # if child.k not in INLINE_NODES: for_children["_inline"].x = pstyle["_block"].x
                         lines = typeset(text[start:end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
                                         style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=start)
-                        edit_view_lines.append((i, lines.children))
-                        for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
+                        edit_view_lines.append((i, lines))
+                        for_children["_inline"] = vec2((c:=lines[-1]).x + c.w, c.y)
                         for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
                     
                 for_children["_block"], for_children["_inline"], for_children["_margin"] = populate_render_data(child, css_rules, for_children, text)
@@ -446,18 +454,20 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
                 if i == len(node.children) - 1 and child_edit_view and child.end != node.end:
                     lines = typeset(text[child.end:node.end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
                                     style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=child.end)
-                    edit_view_lines.append((i+1, lines.children))
-                    for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
+                    edit_view_lines.append((i+1, lines))
+                    for_children["_inline"] = vec2((c:=lines[-1]).x + c.w, c.y)
                     for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
-        for idx, lines in reversed(edit_view_lines): # insertions are delayed until here to preserve insertion idx accuracy
-            for l in reversed(lines):
+        for idx, edit_lines in reversed(edit_view_lines): # insertions are delayed until here to preserve insertion idx accuracy
+            for l in reversed(edit_lines):
                 l.parent = node
                 node.children.insert(idx, l)
     elif child_edit_view:
         lines = typeset(text[node.start:node.end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
                                     style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=node.start)
-        steal_children(lines, node)
-        for_children["_inline"] = vec2((c:=lines.children[-1]).x + c.w, c.y)
+        for l in lines:
+            l.parent = node
+            node.children.append(l)
+        for_children["_inline"] = vec2((c:=node.children[-1]).x + c.w, c.y)
         for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
 
     style.update({k:v for k,v in for_children.items() if k in ["_block", "_inline", "_margin", "_width"]})
@@ -466,7 +476,8 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
     if style["display"] == "block":
         if node.children:
             if not getattr(node, "w", None): node.w = max([c.x + c.w for c in node.children]) - node.x # applies to frame node
-            node.h = (end := node.children[-1].y + node.children[-1].h + style["padding-bottom"]) - node.y
+            node.h = (end := style["_block"].y + style["padding-bottom"]) - node.y
+            # node.h = (end := node.children[-1].y + node.children[-1].h + style["padding-bottom"]) - node.y
             if (c:=style.get("background-color")) and isinstance(c, Color): # ignoring "black", "red" and such
                 SS.quad_buffer_bg.add([node.x, node.y, 0.6, node.w, node.h, (c:=style["background-color"]).r, c.g, c.b, c.a])
             return (_block:=vec2(pstyle["_block"].x, end)), _block, vec2(0, style["margin-bottom"]) # _block, _inline, _margin
@@ -477,12 +488,12 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
         # backgroundcolor not supported
         if node.children:
             node.w = max([c.x + c.w for c in node.children]) - node.x
-            node.h = node.children[-1].y + node.children[-1].h - node.y
+            node.h = style["_block"].y - node.y
         else:
             node.w = node.h = 0
             style["_block"] = pstyle["_block"]
         return style["_block"], style["_inline"], style["_margin"]
-
+    
 def get_font(fontfamily:str, fontweight:int) -> Font:
     ret, d, w = None, math.inf, None
     for font in SS.fonts:
@@ -512,12 +523,12 @@ def char_callback(window, codepoint): queue_event("write", chr(codepoint))
 @GLFWkeyfun
 def key_callback(window, key:int, scancode:int, action:int, mods:int):
     if action in [GLFW_PRESS, GLFW_REPEAT]:
-        selection = bool(mods & GLFW_MOD_SHIFT)
+        shift = bool(mods & GLFW_MOD_SHIFT)
         ctrl = bool(mods & GLFW_MOD_CONTROL)
-        if key == GLFW_KEY_LEFT: queue_event(f"cursor_left_{selection}", 1)
-        elif key == GLFW_KEY_RIGHT: queue_event(f"cursor_right_{selection}", 1)
-        elif key == GLFW_KEY_UP: queue_event(f"cursor_up_{selection}", 1)
-        elif key == GLFW_KEY_DOWN: queue_event(f"cursor_down_{selection}", 1)
+        if key == GLFW_KEY_LEFT: queue_event(f"cursor_left_{shift}", 1)
+        elif key == GLFW_KEY_RIGHT: queue_event(f"cursor_right_{shift}", 1)
+        elif key == GLFW_KEY_UP: queue_event(f"cursor_up_{shift}", 1)
+        elif key == GLFW_KEY_DOWN: queue_event(f"cursor_down_{shift}", 1)
         
         elif key == GLFW_KEY_BACKSPACE: queue_event("erase_left", 1)
         elif key == GLFW_KEY_DELETE: queue_event("erase_right", 1)
@@ -528,12 +539,13 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
         elif key == GLFW_KEY_V and mods & GLFW_MOD_CONTROL: queue_event("write", glfwGetClipboardString(window).decode()) # paste
         elif key == GLFW_KEY_X and mods & GLFW_MOD_CONTROL and frame.cursor.selection: queue_event("cut") # cut
 
-        elif key == GLFW_KEY_HOME: queue_event(f"start_{selection}")
-        elif key == GLFW_KEY_END: queue_event(f"end_{selection}")
+        elif key == GLFW_KEY_HOME: queue_event(f"start_{shift}")
+        elif key == GLFW_KEY_END: queue_event(f"end_{shift}")
 
         elif key == GLFW_KEY_S and ctrl: queue_event("save")
         elif key == GLFW_KEY_A and mods & GLFW_MOD_CONTROL: queue_event("select_all")
         elif key == GLFW_KEY_ESCAPE: queue_event("close")
+        elif key == GLFW_KEY_E and ctrl and shift: queue_events(("save",), ("full_export",))
         elif key == GLFW_KEY_E and ctrl: queue_event("export")
 
 @GLFWmousebuttonfun
@@ -554,6 +566,9 @@ def cursor_pos_callback(window, x, y):
 
 @GLFWscrollfun
 def scroll_callback(window, x, y): SCENE.y += y * 40
+
+def queue_events(*events:Tuple):
+    for e in events: queue_event(*e)
 
 def queue_event(name, *data):
     """Adds to SS.edit_queue. If name matches latest queue entry, adds data to that data (length must match), else appends a new event"""
@@ -645,7 +660,8 @@ default_css = {
 }
 for rule, declarations in default_css.items():
     for k,v in declarations.items(): SS.css.setdefault(rule, declarations).setdefault(k, v)
-frame = Node(K.FRAME, SCENE, [markdown], text=t, editnodes=set(), wraps=[], edit=False)
+frame = Node(K.FRAME, SCENE, [markdown], text=t, editnodes=set(), wraps=[], title=TEXTPATH.stem, edit=False)
+SCENE.children = [frame]
 markdown.parent = frame
 
 # load fonts TODO: load dynamically when used
@@ -654,9 +670,8 @@ for font in SS.fonts:
     font["Font"] = Font(Path(CSSPATH).parent.joinpath(font["url"]).resolve())
 
 populate_render_data(frame, SS.css, reset=True)
-
 frame.cursor = Cursor(frame, idx=CURSORIDX, up=CURSORUP) # after rendertree so it can find line elements in the tree
-SCENE.children = [frame]
+check(SS)
 
 # show(SS)
 
@@ -705,7 +720,7 @@ while not glfwWindowShouldClose(window):
                 else: frame.text = frame.text[:cursor] + frame.text[cursor+data[0]:]
                 reparse = True
             # CURSOR
-            # must rerender because who knows where the new position is in the text
+            # must rerender because who knows where the new position is in the changed text
             elif name.startswith("cursor_pos"):
                 _, _, selection, x, y = name.split("_")
                 selection, x, y = selection == "True", float(x), float(y)
@@ -787,15 +802,16 @@ while not glfwWindowShouldClose(window):
                 reparse = True
             # LINK
             elif name == "open_link":
-                n = frame.cursor._find(frame, cursor)
+                n = frame.cursor._find(frame.children[0], cursor)
                 while n.k in [K.LINE, K.TEXT]: n = n.parent
-                if n.k is K.A:
+                if n.k is K.A and n.href:
                     href = frame.text[n.href[0]:n.href[1]]
                     if not href.startswith(("https://", "http://")):
                         hashidx = href.rfind("#")
                         if hashidx == -1: path, heading = href, ""
                         else: path, heading = href[:hashidx], href[hashidx+1:]
-                        href = TEXTPATH.parent.joinpath(path).resolve() if path != "" else TEXTPATH.resolve()
+                        try: href = TEXTPATH.parent.joinpath(path).resolve() if path != "" else TEXTPATH.resolve()
+                        except: continue
                         if not (p:=Path(href)).is_absolute():
                             try: p = TEXTPATH.parent.joinpath(p).resolve()
                             except: continue
@@ -820,17 +836,58 @@ while not glfwWindowShouldClose(window):
                         else: print(f"INVALID LINK: Target does not exist: {p}")
             # META
             elif name == "close": glfwSetWindowShouldClose(window, GLFW_TRUE)
+            elif name == "full_export":                
+                to_export = {TEXTPATH.resolve()}
+                seen = set() # paths to source of exported files
+                targets = set() # paths to output of exported files
+                
+                out = Path(__file__).parent / "output/"
+                if out.exists(): shutil.rmtree(out)
+                os.mkdir(out)
+                
+                csspath = Path(shutil.copy(CSSPATH, out / "style.css"))
+                targets.add(csspath)
+
+                while len(diff:=to_export.difference(seen)) > 0:
+                    for filepath in diff:
+                        if filepath.suffix == ".md": # convert to html and get additional files this points to
+                            with open(filepath, "r") as f: markdown = parse((t:=f.read()), Node(K.BODY, None, text=t, title=filepath.stem))
+                            for n in walk(markdown):
+                                if n.k in [K.A, K.IMG] and not (href:=t[n.href[0]:n.href[1]]).startswith(("http://", "https://")):
+                                    if n.k is K.A:
+                                        path, heading = (href, "") if (hashidx:=href.rfind("#")) == -1 else (href[:hashidx], href[hashidx+1:])
+                                        try: href = filepath.parent.joinpath(path).resolve() if path != "" else filepath.resolve()
+                                        except: continue
+                                    else:
+                                        try: href = filepath.parent.joinpath(href).resolve() if not (href:=Path(href)).is_absolute() else href
+                                        except: continue
+                                    if href.exists(): to_export.add(href)
+                            with open((target:=out / (filepath.stem + ".html")), "w") as f: f.write(serialize(markdown, csspath, target))
+                        else: shutil.copy(filepath, (target:=out / filepath.name))
+                        targets.add(target)
+                        seen.add(filepath)
+
+                for font in SS.fonts: # move fonts
+                    fontpath = csspath.parent.joinpath(Path(font["url"])).resolve() # assumes url is not from the web and is relative
+                    assert out in iter(fontpath.parents)
+                    os.makedirs(fontpath.parent, exist_ok=True)
+                    shutil.copy(Path(CSSPATH).parent.joinpath(Path(font["url"])).resolve(), fontpath)
+                    targets.add(fontpath)
+
+                print("Fully exported:", *sorted(targets, key=lambda x: x.suffix), sep="\n    ")
+
             elif name == "export":
                 with open(TEXTPATH.parent.joinpath(f"{TEXTPATH.stem}.html").resolve(), "w") as f: f.write(serialize(frame, Path(CSSPATH), TEXTPATH))
             elif name == "save":
                 with open(TEXTPATH, "w") as f: f.write(frame.text)
                 glfwSetWindowTitle(window, TEXTPATH.name.encode())
             else: raise NotImplementedError(name, *data)
+            
             if name.startswith(("cursor_left", "erase_left")): up = False
             
         if reparse: text_update(frame)
         frame.cursor.selection = cursor_selection.copy()
-        frame.cursor.update(cursor, selection=bool(cursor_selection), up=up)
+        frame.cursor.update(cursor, selection=bool(cursor_selection), up=up and cursor in frame.wraps)
         if clipboard: glfwSetClipboardString(window, clipboard.encode()) # copy
 
     if SS.resized:
