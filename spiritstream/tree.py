@@ -354,8 +354,8 @@ def end_node(node:Node) -> Node:
     elif node.k in LINKS and node.href is None: # invalid link
         # merge text nodes
         if node.children[0].k is K.TEXT and "formatting" in node.children[0].cls: node.children[0].cls.remove("formatting")
-        for c0, c1 in zip(node.children, node.children[1:]):
-            if c1.k is K.TEXT and isinstance(c1.cls, list) and "formatting" in c1.cls: c1.cls.remove("formatting")
+        for c0, c1 in zip(node.children.copy(), node.children[1:].copy()):
+            if c1.k is K.TEXT and "formatting" in c1.cls: c1.cls.remove("formatting")
             if c0.k is c1.k is K.TEXT:
                 c1.text = c0.text + c1.text
                 node.children.remove(c0)
