@@ -468,7 +468,7 @@ class TTF:
                 glyph.leftSideBearing = self.fupx(self.hmtx.longHorMetric[glyphIndex].leftSideBearing, fontsize, dpi)
             else:
                 glyph.advanceWidth = self.fupx(self.hmtx.longHorMetric[-1].advanceWidth, fontsize, dpi)
-                glyph.leftSideBearing = self.fupx(self.hmtx.leftSideBearing[glyphIndex - self.hhea.numOfLongHorMetrics])
+                glyph.leftSideBearing = self.fupx(self.hmtx.leftSideBearing[glyphIndex - self.hhea.numOfLongHorMetrics], fontsize, dpi)
         
         if _is_child == False and self.head.flags & 2: glyph.x = [x - glyph.leftSideBearing for x in glyph.x] # this flag means left side bearing should be aligned with x = 0. only applies when not dealing with compound glyph components
         return glyph
