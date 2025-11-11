@@ -381,7 +381,6 @@ TEST_CASES = [
             {"name": "paragraph_line"},
             {"name": "wikilink_start"},
             {"name": "wikilink_end"},
-            {"name": "opening_parenthesis"},
             {"name": "closing_parenthesis"},
             {"name": "new_line"},
             {"name": "paragraph_line"},
@@ -425,7 +424,6 @@ TEST_CASES = [
             {"name": "markdownlink_start"},
             {"name": "markdownlink_start"},
             {"name": "wikilink_end"},
-            {"name": "opening_parenthesis"},
             {"name": "closing_parenthesis"},
             {"name": "new_line"},
             {"name": "paragraph_line"},
@@ -438,19 +436,15 @@ TEST_CASES = [
         "nodes": [{"name": K.BODY},
             {"name": K.P},
             {"name": K.A, "data": {"linktype": "md switched"}},
-            {"name": K.A, "data": {"linktype": "md switched"}},
             {"name": K.CODE},
             {"name": K.P},
             {"name": K.A, "data": {"linktype": "md switched"}},
-            {"name": K.A, "data": {"linktype": "md switched"}},
-            {"name": K.IMG, "data": {"linktype": "md switched"}},
-            {"name": K.P}]
+            {"name": K.IMG, "data": {"linktype": "md switched"}}]
     },
     {
         "name": "parenthesis",
         "md": "\\((\\))\n",
         "tokens": [{"name": "paragraph_line"},
-            {"name": "opening_parenthesis"},
             {"name": "closing_parenthesis"},
             {"name": "new_line"}],
         "nodes": [{"name": K.BODY}, {"name": K.P}, {"name": K.EMPTY_LINE}]
@@ -515,15 +509,8 @@ class test_ast_tokenizer(unittest.TestCase):
                         if "data" in trueNode:
                             for k,v in trueNode["data"].items(): self.assertEqual(v, n.data[k], (i, tokens, list(walk(head))))
                     # check ast integrity
-                    check(head)
-                    for node in walk(head):
-                        if node.children:
-                            for child in node.children:
-                                self.assertIs(node, child.parent)
-                        if node.parent: self.assertTrue(any(node is c for c in node.parent.children))
-                        self.assertNotEqual(node.name, "bolditalic") # all bold italic nodes should be replaced by italic and bold nodes after treeification
-                        if node.parent and node.parent.start and node.start: self.assertLessEqual(node.parent.start, node.start)
-                        if node.parent and node.parent.end and node.end: self.assertGreaterEqual(node.parent.end, node.end)
+                    text = check(head)
+                    self.assertEqual(markdown, text)
                     
                     # head2 = parse(markdown)
                     # show(head2)

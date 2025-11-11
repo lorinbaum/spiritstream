@@ -1,7 +1,6 @@
 from pprint import pprint
-import math, time, pickle, functools, json, argparse, shutil, os
+import math, time, pickle, functools, json, argparse, shutil, os, webbrowser
 from enum import Enum, auto
-from typing import Union, List, Dict, Tuple
 from spiritstream.vec import vec2
 from spiritstream.bindings.glfw import *
 from spiritstream.bindings.opengl import *
@@ -10,237 +9,304 @@ from dataclasses import dataclass
 from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
 from spiritstream.helpers import CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
-from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children, parents, serialize, sluggify, check
+from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children, parents, serialize, sluggify, check, blockparent
 from spiritstream.buffer import BaseQuad, QuadBuffer, TexQuadBuffer
 import spiritstream.image as Image
 
 argparser = argparse.ArgumentParser(description="Spiritstream")
-argparser.add_argument("-f", "--file", type=str, help="Path to file to open")
+argparser.add_argument("file", type=str, nargs="?", default=None, help="Path to file to open")
 args = argparser.parse_args()
 
 try:
     with open(WORKSPACEPATH:=Path(__file__).parent / "cache/workspace.json", "r") as f: data=json.load(f)
 except: data = {}
-if args.file: TEXTPATH, CURSORIDX, CURSORUP, SCENEY = Path(args.file), 0, False, 0
-else:
-    TEXTPATH, CURSORIDX = Path(data.get("textpath", "text.txt")), data.get("cursoridx", 0)
-    CURSORUP, SCENEY = data.get("cursorup", False), data.get("sceney", 0)
+if args.file: TEXTPATH, CURSORIDX, SCENEY = Path(args.file), 0, 0
+else: TEXTPATH, CURSORIDX, SCENEY = Path(data.get("textpath", "Unnamed.md")), data.get("cursoridx", 0), data.get("sceney", 0)
+CURSOR_POST_WRAP = data.get("cursor_post_wrap", False)
 CSSPATH = data.get("csspath", "theme.css")
 TEXTPATH = TEXTPATH.resolve()
 
 FORMATTING_COLOR = color_from_hex(0xaaa)
 CURSOR_COLOR = color_from_hex(0xfff)
 SELECTION_COLOR = color_from_hex(0x423024)
+SELECTION_Z = 0.55
+SELECTION_PADDING = 1
 
 HERITABLE_STYLES = ["color", "font-family", "font-size", "line-height", "font-weight", "text-transform"]
 
 class Cursor:
-    def __init__(self, frame:Node, idx=0, up=False):
+    # TODO drift. consider write, up in event_queue. no rerender after up so how do I know self.x should have changed?
+    def __init__(self, frame:Node, idx=0, post_wrap=False):
         self.frame = frame # keep reference for cursor_coords and linewraps
-        self.idx = idx
         self.pos:vec2
-        self.x = None
-        self.node:Node = None
-        self.selection = Selection()
+        # self.x = None
+        self.node:Node = None # K.TEXT
+        self.offset = None
+        self.selection = None
+        self.post_wrap = post_wrap
         
-        self.update(idx, up=up)
+        self._find_index(idx)
+        self.update_render_data()
 
-    def _find(self, node:Node, pos:Union[int, vec2], up:bool=False) -> Node:
-        if hasattr(node, "children"):
-            if isinstance(pos, int):
-                for c in node.children:
-                    if c.end is None: show(c)
-                    if (up and c.start < pos <= c.end) or (not up and c.start <= pos < c.end): return self._find(c, pos, up)
-                return node
-            else:
-                closest, dx, dy = None, math.inf, math.inf
-                # NOTE: cannot recursively descend through hit children because <p><img ...><text>...</text></p> and text wrapping causes wrong hitbox
-                for c in walk(node): 
-                    if not c.children:
-                        if c.x <= pos.x < c.x + c.w and c.y <= pos.y < c.y + c.h: return c # direct hit
-                        dxc = 0 if c.x <= pos.x <= c.x+c.w else min(abs(pos.x-c.x), abs(pos.x-(c.x+c.w)))
-                        dyc = 0 if c.y <= pos.y <= c.y+c.h else min(abs(pos.y-c.y), abs(pos.y-(c.y+c.h)))
-                        if dyc < dy: closest, dx, dy = c, dxc, dyc
-                        elif dyc == dy and dxc < dx: closest, dx = c, dxc
-                return node if closest is None else closest
-        return node
+    def _find_index(self, idx):
+        total = 0
+        for n in walk(self.frame):
+            if n.k is K.TEXT:
+                if (total+len(n.text)) >= idx and not (idx-total == len(n.text) and n.text[idx-total-1:idx-total] == "\n"):
+                    self.node, self.offset, self.selection = n, idx - total, None
+                    return
+                total+=len(n.text)
+        show(self.frame)
+        raise RuntimeError(f"No text node for index {idx} found")
+    
+    def get_index(self) -> int:
+        assert self.node.k is K.TEXT and self.frame in parents(self.node)
+        ret = 0
+        for n in walk(self.frame):
+            if n.k is K.TEXT:
+                if n is self.node: return ret + self.offset
+                else: ret += len(n.text)
+        raise RuntimeError(f"No text in {self.frame=}")
 
-    def update(self, pos:Union[int, vec2], allow_drift:bool=True, up=False, selection=False):
+    def _find_pos(self, pos:vec2, selection:bool):
+        closest, dx, dy = None, math.inf, math.inf
+        for c in walk(self.frame): # TODO can be more efficient if descending block node hitboxes before leafnodes only
+            if (not c.children and all((v is not None for v in [c.x, c.y, c.w, c.h]))) or c.k is K.IMG:
+                if c.x <= pos.x < c.x + c.w and c.y <= pos.y < c.y + c.h:
+                    closest = c # direct hit
+                    break
+                dxc = 0 if c.x <= pos.x <= c.x+c.w else min(abs(pos.x-c.x), abs(pos.x-(c.x+c.w)))
+                dyc = 0 if c.y <= pos.y <= c.y+c.h else min(abs(pos.y-c.y), abs(pos.y-(c.y+c.h)))
+                if dyc < dy: closest, dx, dy = c, dxc, dyc
+                elif dyc == dy and dxc < dx: closest, dx = c, dxc
+        show(self.frame)
+        self._update_from_closest(closest, pos.x, selection)
+
+    def _update_from_closest(self, closest:Node, x:int, selection:bool):
+        assert closest.k in [K.LINE, K.IMG], closest
+        if closest.k is K.LINE:
+            node, line_offset = closest.parent, closest.xs.index(min(closest.xs, key=lambda x1: abs(x1-x)))
+            offset = sum((len(n.xs)-1 for n in node.children[:node.children.index(closest)])) + line_offset
+            post_wrap = line_offset == 0
+        else: node, offset, post_wrap = closest.children[0], len(closest.children[0].text), False
+        self.update_location(node, offset, selection, post_wrap)
+
+    def next(self, node=None): return next((n for n in walk(self.node if node is None else node, siblings=True) if n.k is K.TEXT), None)
+    def prev(self, node=None): return next((n for n in walk(self.node if node is None else node, reverse=True, siblings=True) if n.k is K.TEXT), None)
+
+    def update_render_data(self):
         """
-        if pos is vec2, get the int. this might fail because _find returns node.
-        In that case, it adds edit=True to the node (and neighbors) and triggers populate_render_data and then updates itself again with pos:vec2
-        NOTE: using up=True only works if the line is wrapped. else node.xs[pos-node.start] will be out of range
+        if self.post_wrap is True and a given offset is shared by two lines, updating render data will use the second line, else the first (default).
         """
-        if isinstance(pos, int): pos = max(min(pos, len(self.frame.text)), 0)
-        if selection and not self.selection: self.selection.i0, self.selection.up0 = self.idx, self.idx == self.node.end
-        node = self._find(self.frame.children[0], pos, up=up)
-        if node.k is K.LINE:
-            if isinstance(pos, int): self.idx, self.pos = pos, vec2(node.xs[pos-node.start], node.y)
-            else:
-                self.idx = node.start + node.xs.index(x:=min(node.xs, key=lambda x: abs(x-pos.x)))
-                self.pos = vec2(x, node.y)
-        else:
-            node = _find_edit_parent(node)
-            rerender = False
-            if not _in_edit_view(node): rerender, node.edit = True, Edit.LOCAL
-            if rerender:
-                populate_render_data(self.frame, SS.css, reset=True)
-                self.update(pos if isinstance(pos, int) else node.start, allow_drift=allow_drift, selection=selection)
-                return
-            else:
-                show(node)
-                raise RuntimeError(f"Could not resolve position {pos} to LINE after enabling edit mode on {node}")
-
-        self.node = node
-
-        # scroll into view
-        # TODO: render only selection that is visible and watch out for edit mode causing jitter while scrolling.
-        if self.pos.y + SCENE.y < 0: SCENE.y = -self.pos.y
-        elif self.pos.y + SCENE.y + self.node.h > SS.h: SCENE.y = SS.h - self.pos.y - self.node.h
-
+        assert self.node.k is K.TEXT
+        show(self.node)
+        # update edit view
         new_editnodes = set()
-        rerender = False
-        if selection and self.idx != self.selection.i0:
-            self.selection.i1, self.selection.up1 = self.idx, self.idx == self.node.end
-            selected_lines = [n for n in walk(self.frame) if n.k is K.LINE
-                      and (n.end >= self.selection.start if self.selection.startup else n.end > self.selection.start)
-                      and (n.start < self.selection.end if self.selection.endup else n.start <= self.selection.end)]
-            for l in selected_lines:
-                p = _find_edit_parent(l, l.start)
-                if not _in_edit_view(p) and p.parent.k not in [K.EMPTY_LINE]: rerender, p.edit = True, Edit.LOCAL
-                if p.edit: new_editnodes.add(p)
-        else:
-            self.selection.reset()
-            SS.quad_buffer_selection.clear()
-        p1 = _find_edit_parent(node)
-        if p1.parent.k not in [K.EMPTY_LINE]: # edit mode changes nothing here, save some rerenders
-            if not _in_edit_view(p1): rerender, p1.edit = True, Edit.LOCAL
-            if p1.edit: new_editnodes.add(p1)
-        # if cursor between nodes on same line, edit=True on both
-        node2 = self._find(self.frame.children[0], self.idx, up=self.idx == node.start)
-        p2 = _find_edit_parent(node2)
-        if node.y == node2.y and p2.parent.k not in [K.EMPTY_LINE]:
-            if not _in_edit_view(p2): rerender, p2.edit = True, Edit.LOCAL
-            if p2.edit: new_editnodes.add(p2)
+        new_editnodes.add(next((p for p in (self.node, *parents(self.node)) if p.k not in INLINE_NODES)))
+        if self.offset == 0 and (prev:=self.prev()) is not None and blockparent(self.node) is blockparent(prev): new_editnodes.add(blockparent(prev))
+        if self.offset == len(self.node.text) and (nxt:=self.next()) is not None and blockparent(self.node) is blockparent(nxt): new_editnodes.add(blockparent(nxt))
+        new_editnodes = set(filter(lambda node: not any((n.edit is Edit.GLOBAL for n in (node, *parents(node)))), new_editnodes))
 
-        for n in self.frame.editnodes:
-            if n not in new_editnodes: n.edit = None # If frame in editnodes (everthing rendered in edit view), rerender is never True
-        if new_editnodes != self.frame.editnodes: rerender = True
-        self.frame.editnodes = new_editnodes
-        if rerender:
-            populate_render_data(self.frame, SS.css, reset=True)
-            self.update(self.idx, allow_drift=allow_drift, selection=selection, up=self.idx == self.node.end)
+        if self.selection:
+            selected = set()
+            if self.selection.start.node is not self.selection.end.node:
+                gen = (n for n in walk(self.selection.start.node, siblings=True) if n.k is K.TEXT)
+                while (nxt:=next(gen, None)):
+                    if nxt is self.selection.end.node: break
+                    selected.add(nxt)
+            for n in (self.selection.start.node, *selected, self.selection.end.node): new_editnodes.add(blockparent(n))
+
+        if self.frame.editnodes != new_editnodes:
+            for n in self.frame.editnodes: n.edit = False
+            self.frame.editnodes = new_editnodes
+            for n in new_editnodes: n.edit = Edit.LOCAL
+            populate_render_data(self.frame, SS.css)
+            self.update_render_data()
         else:
-            if allow_drift: self.x = self.pos.x
-            SS.quad_buffer_cursor.replace([*self.pos.components(), 0.4, 2, node.h, (c:=CURSOR_COLOR).r, c.g, c.b, c.a])
+            l, x = self.get_line_x()
+            # scroll into view
+            if l.y + SCENE.y < 0: SCENE.y = -l.y
+            elif l.y + SCENE.y + self.node.h > SS.h: SCENE.y = SS.h - l.y - self.node.h
+            # TODO: render only selection that is visible and watch out for edit mode causing flashing while scrolling.
             if self.selection:
+                c,p,z = SELECTION_COLOR, SELECTION_PADDING, SELECTION_Z
                 selectionQuads = []
-                for l in selected_lines:
-                    x0 = l.xs[self.selection.start-l.start] if l.start < self.selection.start else l.x
-                    x1 = l.xs[self.selection.end-l.start] if l.end > self.selection.end else l.x+l.w
-                    selectionQuads.extend([x0-2, l.y, 0.55, x1-x0+4, l.h, (c:=SELECTION_COLOR).r, c.g, c.b, c.a])
+                start_l, start_x = self.get_line_x(self.selection.start.node, self.selection.start.offset, self.selection.start.post_wrap)
+                end_l, end_x = self.get_line_x(self.selection.end.node, self.selection.end.offset, self.selection.end.post_wrap)
+                if start_l is not end_l:
+                    # add selection start
+                    selectionQuads.extend([start_x-p, start_l.y, z, start_l.xs[-1]-start_x+2*p, start_l.h, c.r, c.g, c.b, c.a])
+                    # add inbetween
+                    gen = (l for l in walk(start_l, siblings=True) if l.k is K.LINE)
+                    while (nxt:=next(gen, None)):
+                        if nxt is end_l: break
+                        selectionQuads.extend([nxt.x-p, nxt.y, z, nxt.w+2*p, nxt.h, c.r, c.g, c.b, c.a])
+                    # add selection end
+                    selectionQuads.extend([end_l.x-p, end_l.y, z, end_x-end_l.x+2*p, end_l.h, c.r, c.g, c.b, c.a])
+                else: selectionQuads.extend([start_x-p, start_l.y, z, end_x-start_x+2*p, start_l.h, c.r, c.g, c.b, c.a]) # add selection start
                 if selectionQuads: SS.quad_buffer_selection.replace(selectionQuads)
+            else: SS.quad_buffer_selection.clear()
+            SS.quad_buffer_cursor.replace([x, l.y, 0.4, 2, l.h, (c:=CURSOR_COLOR).r, c.g, c.b, c.a])
+    
+    def get_line_x(self, node=None, offset=None, post_wrap=None) -> tuple[Node, float]:
+        # NOTE: if text content was modified, this is only safe to call if the text was also reparsed, else offset can be out of range of line xs.
+        node, offset, post_wrap = map(lambda i: getattr(self, i[0]) if i[1] is None else i[1], (("node", node), ("offset", offset), ("post_wrap", post_wrap)))
+        total, x = 0, None
+        if not node.children: show(self.frame)
+        for l in node.children:
+            if (post_wrap and (total+len(l.xs)-1) > offset) or (not post_wrap and (total+len(l.xs)-1) >= offset):
+                x = l.xs[offset-total]
+                break
+            total += len(l.xs)-1
+        if x is None and post_wrap and total == offset: x = l.xs[total] # if post_wrap prevents finding x, try without
+        if l is None or x is None:
+            show(self.frame)
+            raise RuntimeError((node, l, x, total, offset, post_wrap))
+        return l, x
 
-    def move(self, d:str, selection):
-        assert self.node is not None
-        if d == "up":
-            pos = vec2(self.pos.x if self.x is None else self.x, self.pos.y)
-            leafs = (n for n in walk(self.frame) if not n.children and n.y < self.node.y)
-            closest, dx, dy = None, math.inf, math.inf
-            for l in leafs:
-                dxc = 0 if l.x <= pos.x <= l.x+l.w else min(abs(pos.x-l.x), abs(pos.x-(l.x+l.w)))
-                dyc = 0 if l.y <= pos.y <= l.y+l.h else min(abs(pos.y-l.y), abs(pos.y-(l.y+l.h)))
-                if dyc < dy: closest, dx, dy = l, dxc, dyc
-                elif dyc == dy and dxc < dx: closest, dx = l, dxc
-            if closest is None: self.move("start", selection)
+    def update_location(self, node:Node, offset:int, selection:bool, post_wrap:bool=False):
+        """Sets the parameters as attributes of self while considering any previous or new selections."""
+        if selection:
+            if self.selection: self.selection.l1 = Location(node, offset, post_wrap)
+            else: self.selection = Selection(Location(self.node, self.offset, self.post_wrap), Location(node, offset, post_wrap))
+        elif self.selection: self.selection = None
+        self.node, self.offset, self.post_wrap = node, offset, post_wrap
+    
+    def right(self, count:int=1, selection:bool=False):
+        # NOTE: if not parsed from markdown, can become unintuitive if line starts with \n\n
+        for _ in range(count):
+            if self.selection and not selection: node, offset = self.selection.end.node, self.selection.end.offset
             else:
-                idx = closest.start + closest.xs.index(min(closest.xs, key=lambda x: abs(x-pos.x))) if closest.k is K.LINE else closest.start
-                self.update(idx, selection=selection, allow_drift=False, up=idx==closest.end)
-        elif d == "down":
-            pos = vec2(self.pos.x if self.x is None else self.x, self.pos.y)
-            leafs = (n for n in walk(self.frame) if not n.children and n.y > self.node.y)
-            closest, dx, dy = None, math.inf, math.inf
-            for l in leafs:
-                dxc = 0 if l.x <= pos.x <= l.x+l.w else min(abs(pos.x-l.x), abs(pos.x-(l.x+l.w)))
-                dyc = 0 if l.y <= pos.y <= l.y+l.h else min(abs(pos.y-l.y), abs(pos.y-(l.y+l.h)))
-                if dyc < dy: closest, dx, dy = l, dxc, dyc
-                elif dyc == dy and dxc < dx: closest, dx = l, dxc
-            if closest is None: self.move("end", selection)
-            else:
-                idx = closest.start + closest.xs.index(min(closest.xs, key=lambda x: abs(x-pos.x))) if closest.k is K.LINE else closest.start
-                self.update(idx, selection=selection, allow_drift=False, up=idx==closest.end)
-        elif d == "start":
-            lines = (n for n in walk(self.frame) if n.k is K.LINE and n.y <= self.node.y)
-            linestarts, prevy = [], -math.inf
-            for l in lines:
-                if l.y > prevy:
-                    linestarts.append(l)
-                    prevy = l.y
-            idx, d = None, math.inf
-            for l in linestarts:
-                if l.y == self.node.y and l.start <= self.idx and (d0:=self.idx-l.start) < d: idx, d = l.start, d0
-            if idx is not None: self.update(idx, selection=selection)
-            else: raise RuntimeError
-        elif d == "end":
-            lines = (n for n in walk(self.frame) if n.k is K.LINE and n.y >= self.node.y)
-            lineends, end, prevx, prevy = [], None, -math.inf, -math.inf
-            for l in lines:
-                if l.y == prevy and l.x > prevx: end, prevx, prevy = l, l.x, l.y
-                elif l.y > prevy:
-                    if end is not None: lineends.append(end)
-                    end, prevx, prevy = l, l.x, l.y
-            if end is not None: lineends.append(end)
-            idx, d = None, math.inf
-            for l in lineends:
-                if l.y == self.node.y and l.end >= self.idx and (d0:=l.end-self.idx) < d: idx, d = l.end, d0
-            if idx is not None:
-                # HACK: if text ends with \n, it would try to get to that index, but there is no cursor x position for it.
-                if idx in self.frame.wraps or idx == len(self.frame.text) and self.frame.text[-1] != "\n": self.update(idx, selection=selection, up=True)
-                else: self.update(idx - 1, selection=selection)
-            else: raise RuntimeError
+                if (nxt:=self.next()) is None: node, offset = self.node, min(self.offset+1, len(self.node.text))
+                elif self.offset == len(self.node.text): node, offset = nxt, 1
+                else: node, offset = self.node, self.offset+1
+                # TODO: this should probably be in update_location to prohibit placing a cursor right of \n in any case
+                if nxt is not None and node.text[offset-1:offset] == "\n" and offset==len(node.text):
+                    if nxt is node and (nxt2:=self.next(nxt)) is not None: nxt = nxt2
+                    node, offset = nxt, 0
+            self.update_location(node, offset, selection, self.selection.end.post_wrap if self.selection else node.text[offset-1:offset] == "\n")
+
+    def left(self, count:int=1, selection:bool=False):
+        for _ in range(count):
+            if self.selection and not selection: node, offset = self.selection.start.node, self.selection.start.offset
+            elif (prev:=self.prev()) is None: node, offset = self.node, max(self.offset-1, 0)
+            elif self.offset == 0: node, offset = prev, len(prev.text)-1
+            else: node, offset = self.node, self.offset-1
+            self.update_location(node, offset, selection, self.selection.start.post_wrap if self.selection else True)
+
+    def up(self, count:int=1, selection:bool=False):
+        if self.selection and not selection:
+            self.node, self.offset, self.post_wrap = self.selection.start.node, self.selection.start.offset, self.selection.start.post_wrap
+        prev, x = self.get_line_x()
+        for _ in range(count):
+            node = next((n for n in walk(prev, reverse=True, siblings=True) if n.k in [K.LINE, K.IMG] and n.y+n.h<=prev.y), None)
+            if node is None:
+                self.update_location(prev.parent if prev.k is K.LINE else prev.children[0], 0, selection)
+                self.start(selection)
+                return
+            else: prev = node
+        upline = {prev} # include original line
+        while (prev:=next((n for n in walk(prev, reverse=True, siblings=True) if n.k in [K.LINE, K.IMG] and not n.y+n.h<=prev.y), None)): upline.add(prev)
+        closest = min((n for n in upline), key=lambda n: min([abs(n.x-x), abs(n.x+n.w-x), 0 if n.x<=x<n.x+n.w else math.inf]))
+        self._update_from_closest(closest, x, selection)
+
+    def down(self, count:int=1, selection:bool=False):
+        if self.selection and not selection:
+            self.node, self.offset, self.post_wrap = self.selection.end.node, self.selection.end.offset, self.selection.end.post_wrap
+        prev, x = self.get_line_x()
+        for _ in range(count):
+            node = next((n for n in walk(prev, siblings=True) if n.k in [K.LINE, K.IMG] and n.y>=prev.y+prev.h), None)
+            if node is None:
+                self.update_location((node:=prev.parent if prev.k is K.LINE else prev.children[0]), len(node.text), selection)
+                self.end(selection)
+                return
+            else: prev = node
+        downline = {prev} # include original line
+        while (prev:=next((n for n in walk(prev, siblings=True) if n.k in [K.LINE, K.IMG] and not n.y>=prev.y+prev.h), None)): downline.add(prev)
+        closest = min((n for n in downline), key=lambda n: min([abs(n.x-x), abs(n.x+n.w-x), 0 if n.x<=x<n.x+n.w else math.inf]))
+        self._update_from_closest(closest, x, selection)
+
+    def start(self, selection:bool):
+        (prev, _), start = self.get_line_x(), None
+        while prev is not None:
+            start, g = prev, (n for n in walk(prev, reverse=True, siblings=True) if n.k in [K.LINE, K.IMG])
+            prev = None if (n:=next(g, None)) is None or n.y+n.h <= prev.y else n
+        assert start is not None
+        self._update_from_closest(start, start.x, selection)
+
+    def end(self, selection:bool):
+        (prev, _), end = self.get_line_x(), None
+        while prev is not None:
+            end, g = prev, (n for n in walk(prev, siblings=True) if n.k in [K.LINE, K.IMG])
+            prev = None if (n:=next(g, None)) is None or n.y >= prev.y+prev.h else n
+        assert end is not None
+        self._update_from_closest(end, end.x+end.w, selection)
 
 def _in_edit_view(node:Node) -> bool: return _find_edit_parent(node).edit in [Edit.LOCAL, Edit.GLOBAL] or any((n.edit is Edit.GLOBAL for n in parents(node)))
  
-def _find_edit_parent(node:Node, idx=None) -> Node: return next((n for n in (node, *parents(node)) if n.k not in INLINE_NODES or n.k is K.CODE and "block" in n.cls))
+def _find_edit_parent(node:Node) -> Node: return next((n for n in (node, *parents(node)) if n.k not in INLINE_NODES or n.k is K.CODE and "block" in n.cls))
 
-@dataclass
+@dataclass(frozen=True)
+class Location:
+    node:Node
+    offset:int
+    post_wrap:bool
+
 class Selection:
-    i0:int = None
-    up0:bool = None # whether this index is correctly found using cursor._find with up=True or not
-    i1:int = None
-    up1:bool = None
+    def __init__(self, l0:Location, l1:Location):
+        self.l0, self.l1 = l0, l1
+    def __setattr__(self, name, value:Location):
+        assert name in ["l0", "l1"] and isinstance(value, Location), (name, value) and value.node.k is K.TEXT
+        super().__setattr__(name, value)
+        if hasattr(self, "l0") and hasattr(self, "l1"):
+            start, end = self._order(self.l0, self.l1)
+            for k,v in (("start", start), ("end", end)): super().__setattr__(k,v)
+    def _order(self, l0:Location, l1:Location) -> tuple:
+        """Returns in order in which locations l0 and l1 appear in the tree. Uses offset if nodes are the same, else Lowest Common Ancestor"""
+        if l0.node is l1.node: return (l0, l1) if l0.offset < l1.offset else (l1, l0)
+        p0, p1 = map(lambda n: list((n, *parents(n))), (l0.node, l1.node))
+        if p0[0] in p1 or p1[0] in p0: raise RuntimeError(f"Can't determine order, {l0=} or {l1=} is inside the other.")
+        p0, p1 = p0[-(l:=min(len(p0), len(p1))):], p1[-l:]
+        idx, lca = next(((i, i0) for i,(i0,i1) in enumerate(zip(p0, p1)) if i0 is i1))
+        n = next((n for n in lca.children if n in (p0[idx-1], p1[idx-1])))
+        return (l0, l1) if n is p0[idx-1] else (l1, l0)
+    def __repr__(self): return f"Selection(\n  {self.start}\n  {self.end})"
+
+def _get_selection_text(frame:Node, sel:Selection) -> str:
+    assert frame in parents(sel.start.node) and frame in parents(sel.end.node)
+    if sel.start.node is sel.end.node: return sel.start.node.text[sel.start.offset:sel.end.offset]
+    else:
+        ret = sel.start.node.text[sel.start.offset:]
+        gen = (n for n in walk(sel.start.node, siblings=True) if n.k is K.TEXT)    
+        while (nxt:=next(gen, None)):
+            if nxt is sel.end.node: break
+            ret += nxt.text
+        return ret + sel.end.node.text[:sel.end.offset]
     
-    @property
-    def start(self): return min(self.i0, self.i1)
-    @property
-    def end(self): return max(self.i0, self.i1)
-    @property
-    def startup(self): return self.up0 if self.i0 < self.i1 else self.up1
-    @property
-    def endup(self): return self.up0 if self.i0 > self.i1 else self.up1
+def _del_selection_text(frame:Node, sel:Selection):
+    assert frame in parents(sel.start.node) and frame in parents(sel.end.node)
+    if sel.start.node is sel.end.node: sel.start.node.text = sel.start.node.text[:sel.start.offset] + sel.start.node.text[sel.end.offset:]
+    else:
+        sel.start.node.text = sel.start.node.text[:sel.start.offset]
+        gen = (n for n in walk(sel.start.node, siblings=True) if n.k is K.TEXT)    
+        while (nxt:=next(gen, None)) and nxt is not sel.end.node: nxt.text = ""
+        sel.end.node.text = sel.end.node.text[sel.end.offset:]
 
-    def reset(self): self.i0 = self.up0 = self.i1 = self.up1 = None
-    def copy(self): return Selection(self.i0, self.up0, self.i1, self.up1)
-    def __bool__(self): return all((i is not None for i in (self.i0, self.up0, self.i1, self.up1)))
-
-def typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left",
-            start=0) -> Tuple[Node, List[float]]:
-    lines, idata, wraps = _typeset(text, x, y, width, fontfamily, fontsize, fontweight, color, lineheight, newline_x, align, start)
+def typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left") -> tuple[Node, list[float]]:
+    lines, idata = _typeset(text, x, y, width, fontfamily, fontsize, fontweight, color, lineheight, newline_x, align)
     SS.glyph_buffer.add(idata)
-    frame.wraps.extend(wraps)
     return lines
 
 # TODO: select font more carefully. may contain symbols not in font
 # something like g = next((fonŧ[g] for font in fonts if g in font))
 # TODO: line_strings is creating ambiguity, sucks, remove. index into text using line start and end to actually get the text. obviously.
 @functools.lru_cache(maxsize=1024) # TODO custom cache so it can also shift cached lines down
-def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left",
-             start=0) -> Tuple[Node, List[float]]:
+def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left") -> tuple[Node, list[float]]:
     """
     Returns
     - Node with LINE children to add to the node tree
     - Tex quad instance data for all glyphs
-    - List of indices where text wraps
+    - list of indices where text wraps
     """
     font, fontweight = get_font(fontfamily, fontweight) # replace fontweight value with actual used based on what's available
     cx = x # character x offset
@@ -248,40 +314,33 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
     if newline_x is None: newline_x = x
     assert cx <= newline_x + width, (cx, newline_x, width)
     lines, line_strings = [], [""]
-    lstart = 0 # char index where line started
-    xs = [] # cursor x positions
-    wraps = [] # idx of wraps
-    idx = 0
-    for idx, c in enumerate(text):
-        xs.append(cx)
+    xs = [cx] # cursor x positions
+    for i, c in enumerate(text):
         if c == "\n":
-            lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
-            cx, linepos, xs, lstart = newline_x, vec2(newline_x, linepos.y + lineheight), [], idx+1
+            lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, xs=xs+[cx]))
+            cx, linepos, xs = newline_x, vec2(newline_x, linepos.y + lineheight), [] if i == len(text)-1 else [newline_x]
             line_strings.append("")
             continue
         g = font.glyph(c, fontsize, 72) # NOTE: dpi is 72 so the font renderer does no further scaling. It uses 72 dpi baseline.
         if cx + g.advance > newline_x + width:
             wrap_idx = fwrap + 1 if (fwrap:=line_strings[-1].rfind(" ")) >= 0 else len(line_strings[-1])
-            wraps.append(wrap_idx + start + lstart)
             if wrap_idx == len(line_strings[-1]): # no wrapping necessary, just cut off
-                lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start+idx, xs=xs))
+                lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, xs=xs))
                 cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
-                xs, lstart = [cx], idx
+                xs = [cx]
                 line_strings.append("")
             else:
                 line_strings.append(line_strings[-1][wrap_idx:])
                 line_strings[-2] = line_strings[-2][:wrap_idx]
-                lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=xs[wrap_idx] - linepos.x, h=lineheight, start=start+lstart,
-                                end=start+lstart+wrap_idx, xs=xs[:wrap_idx+1]))
-                xs, lstart = [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]], lstart + wrap_idx
+                lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=xs[wrap_idx] - linepos.x, h=lineheight, xs=xs[:wrap_idx+1]))
+                xs = [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]]
                 cx, linepos = xs[-1], vec2(newline_x, linepos.y + lineheight)
 
         line_strings[-1] += c
         cx += g.advance
+        xs.append(cx)
 
-    xs.append(cx) # first position after the last character
-    if line_strings[-1] != "" or text == "":
-        lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, start=start+lstart, end=start + idx+1, xs=xs))
+    if xs: lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, xs=xs))
     if align in ["center", "right"]:
         for c in lines:
             shift = x+width-c.w-c.x / (2 if align == "center" else 1)
@@ -301,11 +360,24 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
                     g.size.x, -g.size.y, # size
                     *(SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, font.render(c, fontsize, 72))), # uv offset and size
                     color.r, color.g, color.b, color.a] # color
-    return lines, instance_data, wraps
+    return lines, instance_data
 
 class Edit(Enum): GLOBAL, LOCAL = auto(), auto() # GLOBAL affects gaps in all descendants, LOCAL affects only gaps in direct children, 
 
-def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=None, reset:bool=False) -> Tuple[vec2, vec2, vec2]:
+def populate_render_data(node:Node, css_rules:dict, pstyle:dict=None):
+    SS.quad_buffer_bg.clear()
+    SS.quad_buffer_cursor.clear()
+    SS.quad_buffer_selection.clear()
+    SS.glyph_buffer.clear()
+    for b in SS.img_buffers: b.clear()
+    SS.img_buffers.clear()
+    to_delete = list(filter(lambda x: x.k is K.LINE, walk(node)))
+    for l in to_delete: l.parent.children.remove(l)
+    for n in walk(node):
+        if n.k is K.TEXT: n.x, n.y, n.w, n.h = None, None, None, None # formatting text that is no longer visible could disrupt cursor finding position.
+    _populate_render_data(node, css_rules, pstyle)
+
+def _populate_render_data(node:Node, css_rules:dict, pstyle:dict=None) -> tuple[vec2, vec2, vec2]:
     """
     Recursively walks through node and children to:
     - determine style information for each node
@@ -323,19 +395,8 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
         _margin:vec2    Used for margin collapse. _margin.x = margin-right of latest inline element, _margin.y = margin-bottom of latest block element
         _width:float    width of content box, passed to children
     
-    Returns: Tuple(_block, _inline, _margin) used internally for positioning siblings
+    Returns: tuple(_block, _inline, _margin) used internally for positioning siblings
     """
-    if reset:
-        SS.quad_buffer_bg.clear()
-        SS.quad_buffer_cursor.clear()
-        SS.quad_buffer_selection.clear()
-        SS.glyph_buffer.clear()
-        for b in SS.img_buffers: b.clear()
-        SS.img_buffers.clear()
-        to_delete = list(filter(lambda x: x.k is K.LINE, walk(node)))
-        for l in to_delete: l.parent.children.remove(l)
-        frame.wraps = []
-    if node.k is K.FRAME: text = node.text
     # inherit and apply style
     if pstyle is None: pstyle = {"font-size": (16.0, "px")}
     for k, v in {"_block": vec2(0, 0), "_inline": vec2(0, 0), "_margin": vec2(0, 0), "_width": 0.0}.items(): pstyle.setdefault(k, v)
@@ -346,6 +407,7 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
     style.update({k:csspx(pstyle, style, k) for k in ["width", "font-size"] if k in style}) # update first, other relative units need them
     for_children = {k:v for k,v in style.items() if k in HERITABLE_STYLES} # pass on before more conversion so relative values are recomputed
     style = {k:csspx(pstyle, style, k) for k in style.keys()} # convert px, em, %, auto to device pixels
+    
     edit_view = _in_edit_view(node)
 
     style["display"] = style.get("display", "inline" if node.k in INLINE_NODES else "block")
@@ -363,17 +425,26 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
             y = node.y + style["font-size"] * 0.066666 # hack to approximate browser rendering. Shift without changing node.y for talled node.
             if node.parent.k is K.UL:
                 typeset("•", style["_inline"].x - 1.25 * style["font-size"], y, style["font-size"], style["font-family"], style["font-size"]*1.4,
-                        style["font-weight"], style["color"], style["line-height"]*1.075, align="right", start=node.start)
+                        style["font-weight"], style["color"], style["line-height"]*1.075, align="right")
             elif node.parent.k is K.OL:
                 typeset(d:=f"{node.digit}.", style["_inline"].x-(len(d)+0.5)*style["font-size"], y, style["font-size"]*len(d), style["font-family"],
-                        style["font-size"]*1.05, style["font-weight"], style["color"], style["line-height"]*1.075, align="right", start=node.start)
+                        style["font-size"]*1.05, style["font-weight"], style["color"], style["line-height"]*1.075, align="right")
+        # elif node.k is K.TOC:
+            # toclevel = None
+            # level = 0
+            # headings = []
+            # for n in walk(frame):
+            #     if n is node: toclevel = level
+            #     if n.k in [K.H1, K.H2, K.H3, K.H4, K.H5, K.H6]:
+            #         level = int(n.k.name[-1])
+            #         if toclevel is not None and level >= toclevel:
     else:
         style["_width"] = pstyle["_width"]
         style["_margin"] = vec2(style["margin-right"], 0)
         style["_inline"] = pstyle["_inline"] + vec2(style["margin-left"], 0)
         node.x, node.y = style["_inline"].x, style["_inline"].y
         if node.k is K.IMG and not edit_view:
-            path = TEXTPATH.parent.joinpath(text[node.href[0]:node.href[1]]).resolve()
+            path = TEXTPATH.parent.joinpath(node.href).resolve()
             if not path.exists(): path = Path(__file__).parent / "home/Image-not-found.png"
             if path.as_posix() not in SS.img_cache:
                 img = Image.read(path)
@@ -401,16 +472,14 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
             total = ascentpx - descentpx
             style["_inline"] = vec2(node.x + node.w, node.y + node.h - (style["line-height"] - total)/2 - ascentpx)
             style["_block"] = vec2(pstyle["_block"].x, style["_inline"].y + style["line-height"])
-
             return style["_block"], style["_inline"], vec2(0, style["margin-bottom"]) # early return because img never has children
-        elif node.k is K.TEXT:
+        elif node.k is K.TEXT and ((edit_view and "formatting" in node.cls) or "formatting" not in node.cls):
             y = node.y
             if node.parent.k is K.HR and not edit_view: SS.quad_buffer_bg.add([node.x, node.y, 0.6, style["_width"], 1, (c:=style["color"]).r, c.g, c.b, c.a])
-            t = text[node.start:node.end].upper() if style.get("text-transform") == "uppercase" else text[node.start:node.end]
-            if node.end-node.start > len(t): t += "\n" # HACK: this only happens at file end and ensures that there is an additional cursor position at the end
-            lines = typeset(t, node.x, y, style["_width"], style["font-family"], style["font-size"], style["font-weight"], style["color"], style["line-height"],
-                            pstyle["_block"].x, start=node.start)
-            if lines == []: show(lines); print(t)
+            t = node.text.upper() if style.get("text-transform") == "uppercase" else node.text
+            color = FORMATTING_COLOR if edit_view and "formatting" in node.cls else style["color"]
+            lines = typeset(t, node.x, y, style["_width"], style["font-family"], style["font-size"], style["font-weight"], color, style["line-height"],
+                            pstyle["_block"].x)
             if node.parent.k is K.A:
                 font, _ = get_font(style["font-family"], style["font-weight"])
                 ascentpx = font.engine.hhea.ascent * style["font-size"] / font.engine.head.unitsPerEM
@@ -432,44 +501,10 @@ def populate_render_data(node:Node, css_rules:Dict, pstyle:Dict=None, text:str=N
     # process children and if edit view, fill any gaps (omitted formatting text) before and after
     # NOTE: Formatting text is put OUTSIDE of TEXT nodes because their start/end is outside. Expanding TEXT start/end would falsify content
     for_children.update({k:v for k,v in style.items() if k in ["_block", "_inline", "_margin", "_width"]})
-    edit_view_lines = [] # List[Tuple[idx, lines]]
-    child_edit_view = edit_view and node.k not in [K.SS, K.SCENE, K.FRAME, K.BODY]
     if node.children:
-        for i, child in enumerate(node.children):
+        for child in node.children:
             if child.k is not K.LINE:
-                if child_edit_view:
-                    start = end = None
-                    if i == 0 and node.start != child.start: start, end = node.start, child.start
-                    elif i > 0 and node.children[i-1].end != child.start: start, end = node.children[i-1].end, child.start
-                    if start is not None:
-                        # if child.k not in INLINE_NODES: for_children["_inline"].x = pstyle["_block"].x
-                        lines = typeset(text[start:end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
-                                        style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=start)
-                        edit_view_lines.append((i, lines))
-                        for_children["_inline"] = vec2((c:=lines[-1]).x + c.w, c.y)
-                        for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
-                    
-                for_children["_block"], for_children["_inline"], for_children["_margin"] = populate_render_data(child, css_rules, for_children, text)
-
-                if i == len(node.children) - 1 and child_edit_view and child.end != node.end:
-                    lines = typeset(text[child.end:node.end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
-                                    style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=child.end)
-                    edit_view_lines.append((i+1, lines))
-                    for_children["_inline"] = vec2((c:=lines[-1]).x + c.w, c.y)
-                    for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
-        for idx, edit_lines in reversed(edit_view_lines): # insertions are delayed until here to preserve insertion idx accuracy
-            for l in reversed(edit_lines):
-                l.parent = node
-                node.children.insert(idx, l)
-    elif child_edit_view:
-        lines = typeset(text[node.start:node.end], for_children["_inline"].x, for_children["_inline"].y, style["_width"], style["font-family"],
-                                    style["font-size"], style["font-weight"], FORMATTING_COLOR, style["line-height"], for_children["_block"].x, start=node.start)
-        for l in lines:
-            l.parent = node
-            node.children.append(l)
-        for_children["_inline"] = vec2((c:=node.children[-1]).x + c.w, c.y)
-        for_children["_block"] = vec2(style["_block"].x, c.y + c.h)
-
+                for_children["_block"], for_children["_inline"], for_children["_margin"] = _populate_render_data(child, css_rules, for_children)
     style.update({k:v for k,v in for_children.items() if k in ["_block", "_inline", "_margin", "_width"]})
 
     # update _block, _inline and _margin for return
@@ -501,7 +536,7 @@ def get_font(fontfamily:str, fontweight:int) -> Font:
     assert ret is not None
     return ret, w
 
-def csspx(pstyle:Dict, style:Dict, k:str) -> float:
+def csspx(pstyle:dict, style:dict, k:str) -> float:
     """Converts CSS values based on unit. CSS assumes 96 DPI for px and EM are relative to font-size"""
     v = style[k]
     if v == "auto" and k in ["margin-left", "margin-right"]: return max((pstyle["_width"] - style["width"]) / 2, 0) # style["width"] must be defined
@@ -567,21 +602,21 @@ def cursor_pos_callback(window, x, y):
 @GLFWscrollfun
 def scroll_callback(window, x, y): SCENE.y += y * 40
 
-def queue_events(*events:Tuple):
+def queue_events(*events:tuple):
     for e in events: queue_event(*e)
 
 def queue_event(name, *data):
-    """Adds to SS.edit_queue. If name matches latest queue entry, adds data to that data (length must match), else appends a new event"""
+    """Adds to SS.event_queue. If name matches latest queue entry, adds data to that data (length must match), else appends a new event"""
     # HACK: mouse_callback and cursor_pos_callback will both cause cursor_pos events. If I just append to the queue, mouse_callback will spam it,
     # if I always replace the latest one, clicking while dragging will replace the cursor_pos_callback with the mouse_callback which always has
     # selection on True, then it would use the previous cursor position for the start of a selection (unintended behavior).
     # allowing max 2 cursor_pos fixes this, allowing click and drag to separate but not spam.
-    if name.startswith("cursor_pos") and len(SS.edit_queue) >= 2 and SS.edit_queue[-2][0].startswith("cursor_pos") and\
-        SS.edit_queue[-1][0].startswith("cursor_pos"): SS.edit_queue[-1] = [name, *data]
-    elif SS.edit_queue and SS.edit_queue[-1][0] == name and name != "open_link": # can't merge open_link
-        assert len(SS.edit_queue[-1]) == len(data) + 1
-        for i, d in enumerate(data): SS.edit_queue[-1][i+1] += d
-    else: SS.edit_queue.append([name, *data])
+    if name.startswith("cursor_pos") and len(SS.event_queue) >= 2 and SS.event_queue[-2][0].startswith("cursor_pos") and\
+        SS.event_queue[-1][0].startswith("cursor_pos"): SS.event_queue[-1] = [name, *data]
+    elif SS.event_queue and SS.event_queue[-1][0] == name and name != "open_link": # can't merge open_link
+        assert len(SS.event_queue[-1]) == len(data) + 1
+        for i, d in enumerate(data): SS.event_queue[-1][i+1] += d
+    else: SS.event_queue.append([name, *data])
 
 def pseudoclass(node:Node, pseudocl:str) -> bool: return False # TODO
 
@@ -592,16 +627,18 @@ def selector_match(sel:Selector, node:Node) -> bool: return all((
     (all((pseudoclass(node, i) for i in sel.pseudocls))) if sel.pseudocls else True,
 ))
 
-def text_update(frame):
-    markdown = parse(frame.text)
+def text_update(frame, text:str=None):
+    if text is None: idx, markdown = frame.cursor.get_index(), parse("".join((n.text for n in walk(frame) if n.k is K.TEXT)))
+    else: idx, markdown = 0, parse(text)
     frame.children = [markdown]
     markdown.parent = frame
-    populate_render_data(frame, SS.css, reset=True)
+    populate_render_data(frame, SS.css)
+    frame.cursor._find_index(idx)
     glfwSetWindowTitle(window, (TEXTPATH.name + "*").encode())
 
-SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1000, edit_queue=[])
+SS = Node(K.SS, None, resized=True, scrolled=False, fonts={}, glyphAtlas=None, dpi=96, title="Spiritstream", w=700, h=1000, event_queue=[])
 SCENE = Node(K.SCENE, SS, x=0, y=SCENEY)
-SS.children = [SCENE]
+SS.children.append(SCENE)
 
 glfwInit()
 glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
@@ -652,7 +689,7 @@ glClearColor(0, 0, 0, 1)
 
 TEXTPATH.touch()
 glfwSetWindowTitle(window, TEXTPATH.name.encode())
-with open(TEXTPATH, "r") as f: markdown = parse(t:=f.read())
+with open(TEXTPATH, "r") as f: markdown = parse(f.read())
 with open(CSSPATH, "r") as f: SS.css, SS.fonts = parseCSS(f.read())
 default_css = {
     Selector(K.BODY):{"font-size": (16, "px"), "font-weight": 400},
@@ -660,7 +697,7 @@ default_css = {
 }
 for rule, declarations in default_css.items():
     for k,v in declarations.items(): SS.css.setdefault(rule, declarations).setdefault(k, v)
-frame = Node(K.FRAME, SCENE, [markdown], text=t, editnodes=set(), wraps=[], title=TEXTPATH.stem, edit=False)
+frame = Node(K.FRAME, SCENE, [markdown], editnodes=set(), wraps=[], title=TEXTPATH.stem, edit=False)
 SCENE.children = [frame]
 markdown.parent = frame
 
@@ -669,55 +706,64 @@ for font in SS.fonts:
     assert font["format"] == "truetype"
     font["Font"] = Font(Path(CSSPATH).parent.joinpath(font["url"]).resolve())
 
-populate_render_data(frame, SS.css, reset=True)
-frame.cursor = Cursor(frame, idx=CURSORIDX, up=CURSORUP) # after rendertree so it can find line elements in the tree
+populate_render_data(frame, SS.css)
+show(SS)
+frame.cursor = Cursor(frame, idx=CURSORIDX, post_wrap=CURSOR_POST_WRAP) # after rendertree so it can find line elements in the tree
 check(SS)
 
-# show(SS)
+show(SS)
 
 while not glfwWindowShouldClose(window):
     # HACK: necessary to actually get multiple events if they accumulated (X11?)
     prevsize = -1
-
-    while len(SS.edit_queue) > prevsize:
-        prevsize = len(SS.edit_queue)
+    while len(SS.event_queue) > prevsize:
+        prevsize = len(SS.event_queue)
         for i in range(20):
             glfwPollEvents()
             time.sleep(0.0001)
-    edit_queue = SS.edit_queue.copy()
-    SS.edit_queue.clear()
+    event_queue = SS.event_queue.copy()
+    SS.event_queue.clear()
 
-    cursor = frame.cursor.idx
-    up = frame.cursor.idx == frame.cursor.node.end
-    cursor_selection = frame.cursor.selection.copy()
-    clipboard = c.decode() if (c:=glfwGetClipboardString(window)) else ""
-    if edit_queue:
+    if event_queue:
         reparse = False
-        for name, *data in edit_queue:
+        for name, *data in event_queue:
             if name == "write":
-                if cursor_selection:
-                    frame.text = frame.text[:cursor_selection.start] + data[0] + frame.text[cursor_selection.end:]
-                    cursor = cursor_selection.start + len(data[0])
-                    cursor_selection.reset()
-                else:
-                    frame.text = frame.text[:cursor] + data[0] + frame.text[cursor:]
-                    cursor += len(data[0])
+                if frame.cursor.selection:
+                    _del_selection_text(frame, frame.cursor.selection)
+                    frame.cursor.update_location((s:=frame.cursor.selection.start).node, s.offset, False, s.post_wrap)
+                cn, o = frame.cursor.node, frame.cursor.offset
+                cn.text = cn.text[:o] + data[0] + cn.text[o:]
+                frame.cursor.right(len(data[0]))
                 reparse = True
             elif name == "erase_left":
-                if cursor_selection:
-                    frame.text = frame.text[:cursor_selection.start] + frame.text[cursor_selection.end:]
-                    cursor = cursor_selection.start
-                    cursor_selection.reset()
+                if frame.cursor.selection:
+                    _del_selection_text(frame, frame.cursor.selection)
+                    frame.cursor.update_location((s:=frame.cursor.selection.start).node, s.offset, False, s.post_wrap)
                 else:
-                    frame.text = frame.text[:max(0, cursor-data[0])] + frame.text[cursor:]
-                    cursor = max(0, cursor - data[0])
+                    for _ in range(data[0]):
+                        if frame.cursor.offset == 0:
+                            if (prev:=frame.cursor.prev()):
+                                prev.text = prev.text[:-1]
+                                frame.cursor.update_location(prev, len(prev.text), False)
+                            else: break
+                        else:
+                            cn = frame.cursor.node
+                            cn.text = cn.text[:max(0, frame.cursor.offset-1)] + cn.text[frame.cursor.offset:]
+                            frame.cursor.offset = frame.cursor.offset-1
+                            frame.cursor.post_wrap = True # always True when walking left
                 reparse = True
             elif name == "erase_right":
-                if cursor_selection:
-                    frame.text = frame.text[:cursor_selection.start] + frame.text[cursor_selection.end:]
-                    cursor = cursor_selection.start
-                    cursor_selection.reset()
-                else: frame.text = frame.text[:cursor] + frame.text[cursor+data[0]:]
+                for _ in range(data[0]):
+                    if frame.cursor.selection:
+                        _del_selection_text(frame, frame.cursor.selection)
+                        frame.cursor.update_location((s:=frame.cursor.selection.start).node, s.offset, False, s.post_wrap)
+                    else:
+                        if frame.cursor.offset == len(frame.cursor.node.text):
+                            if (nxt:=frame.cursor.next()): nxt.text = nxt.text[1:]
+                            else: break
+                        else:
+                            cn = frame.cursor.node
+                            cn.text = cn.text[:frame.cursor.offset] + cn.text[frame.cursor.offset+1:]
                 reparse = True
             # CURSOR
             # must rerender because who knows where the new position is in the changed text
@@ -725,88 +771,49 @@ while not glfwWindowShouldClose(window):
                 _, _, selection, x, y = name.split("_")
                 selection, x, y = selection == "True", float(x), float(y)
                 if reparse: text_update(frame); reparse = False
-                frame.cursor.update(vec2(x,y), selection=selection)
-                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
-            elif name == "select_all":
-                cursor_selection = Selection(0, False, len(frame.text), False)
-                cursor = len(frame.text)
+                frame.cursor._find_pos(vec2(x,y), selection)
+            elif name == "select_all": frame.cursor.selection = Selection(Location(next((n for n in walk(frame) if n.k is K.TEXT)), 0, False),
+                Location((n:=next((n for n in walk(frame, reverse=True) if n.k is K.TEXT))), len(n.text), True))
             # START END
             elif name.startswith("start"):
-                selection = name.split("_")[1] == "True"
                 if reparse: text_update(frame); reparse = False
-                frame.cursor.move("start", selection=selection)
-                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
+                frame.cursor.start(name.split("_")[1] == "True")
             elif name.startswith("end"):
-                selection = name.split("_")[1] == "True"
                 if reparse: text_update(frame); reparse = False
-                frame.cursor.move("end", selection=selection)
-                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
+                frame.cursor.end(name.split("_")[1] == "True")
             # CURSOR DIRECTIONS
             elif name.startswith("cursor_up"):
-                selection = name.split("_")[2] == "True"
-                for i in range(data[0]):
-                    if reparse:
-                        text_update(frame); reparse = False
-                    frame.cursor.move("up", selection=selection)
-                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
-            elif name.startswith("cursor_right"):
-                selection = name.split("_")[2] == "True"
-                if selection:
-                    if cursor_selection: cursor_selection.i1 = min(len(frame.text), cursor+data[0])
-                    else: cursor_selection = Selection(cursor, False, min(len(frame.text), cursor+data[0]), False)
-                    if (p:=min(len(frame.text), cursor+data[0])) in frame.wraps: up = True
-                    cursor = p
-                else:
-                    if cursor_selection:
-                        cursor = cursor_selection.end
-                        cursor_selection.reset()
-                    else:
-                        if (p:=min(len(frame.text), cursor+data[0])) in frame.wraps: up = True
-                        cursor = p
+                if reparse: text_update(frame); reparse = False
+                frame.cursor.up(data[0], name.split("_")[2] == "True")
+            elif name.startswith("cursor_right"): frame.cursor.right(data[0], name.split("_")[2] == "True")
             elif name.startswith("cursor_down"):
-                selection = name.split("_")[2] == "True"
-                for i in range(data[0]):
-                    if reparse:
-                        text_update(frame); reparse = False
-                    frame.cursor.move("down", selection=selection)
-                cursor, up, cursor_selection = frame.cursor.idx, frame.cursor.idx == frame.cursor.node.end, frame.cursor.selection.copy()
-            elif name.startswith("cursor_left"):
-                selection = name.split("_")[2] == "True"
-                if selection:
-                    if cursor_selection: cursor_selection.i1 = max(0, cursor-data[0])
-                    else: cursor_selection = Selection(cursor, False, max(0, cursor-data[0]), False)
-                    cursor = max(0, cursor-data[0])
-                else:
-                    if cursor_selection:
-                        cursor = cursor_selection.start
-                        cursor_selection.reset()
-                    else: cursor = max(0, cursor-data[0])
+                if reparse: text_update(frame); reparse = False
+                frame.cursor.down(data[0], name.split("_")[2] == "True")
+            elif name.startswith("cursor_left"): frame.cursor.left(data[0], name.split("_")[2] == "True")
             # COPY CUT PASTE
             elif name == "copy":
-                if cursor_selection: clipboard = frame.text[cursor_selection.start:cursor_selection.end]
+                if frame.cursor.selection: glfwSetClipboardString(window, _get_selection_text(frame, frame.cursor.selection).encode())
             elif name == "cut":
-                if cursor_selection:
-                    clipboard = frame.text[cursor_selection.start:cursor_selection.end]
-                    frame.text = frame.text[:cursor_selection.start] + frame.text[cursor_selection.end:]
-                    cursor = cursor_selection.start
-                    cursor_selection.reset()
+                if frame.cursor.selection:
+                    glfwSetClipboardString(window, _get_selection_text(frame, frame.cursor.selection).encode())
+                    _del_selection_text(frame, frame.cursor.selection)
                 reparse = True
             elif name == "paste":
-                if cursor_selection:
-                    frame.text = frame.text[:cursor_selection.start] + clipboard + frame.text[cursor_selection.end:]
-                    cursor = cursor_selection.start + len(clipboard)
-                    cursor_selection.reset()
-                else:
-                    frame.text = frame.text[:cursor] + clipboard + frame.text[cursor:]
-                    cursor += len(clipboard)
+                if frame.cursor.selection:
+                    _del_selection_text(frame, frame.cursor.selection)
+                    frame.cursor.update_location((s:=frame.cursor.selection.start).node, s.offset, False, s.post_wrap)
+                cn, o, t = frame.cursor.node, frame.cursor.offset, glfwGetClipboardString(window)
+                cn.text = cn.text[:o] + t + cn.text[o:]
+                frame.cursor.right(len(t))
                 reparse = True
             # LINK
             elif name == "open_link":
-                n = frame.cursor._find(frame.children[0], cursor)
+                n = frame.cursor.node
                 while n.k in [K.LINE, K.TEXT]: n = n.parent
-                if n.k is K.A and n.href:
-                    href = frame.text[n.href[0]:n.href[1]]
-                    if not href.startswith(("https://", "http://")):
+                if n.k is K.A:
+                    href = n.href
+                    if href.startswith(("https://", "http://")): webbrowser.open(href)
+                    else:
                         hashidx = href.rfind("#")
                         if hashidx == -1: path, heading = href, ""
                         else: path, heading = href[:hashidx], href[hashidx+1:]
@@ -819,19 +826,19 @@ while not glfwWindowShouldClose(window):
                             if p.as_posix() != TEXTPATH.as_posix():
                                 TEXTPATH = p
                                 try:
-                                    with open(p, "r") as f: frame.text = f.read()
+                                    with open(p, "r") as f: t = f.read()
                                 except:
-                                    frame.text = f"Unable to load file {p.as_posix()}"
+                                    t = f"Unable to load file {p.as_posix()}"
                                     TEXTPATH = Path("")
                                 SCENE.y = 0
-                                cursor = 0
-                                text_update(frame)
+                                text_update(frame, t)
                                 glfwSetWindowTitle(window, TEXTPATH.name.encode())
                             if heading:
                                 heading = sluggify(heading)
                                 for n in walk(frame):
-                                    if n.k is K.TEXT and n.parent.k in [K.H1,K.H2,K.H3,K.H4,K.H5,K.H6] and sluggify(frame.text[n.start:n.end]) == heading:
-                                        SCENE.y, cursor = -n.y, n.start
+                                    if n.k in [K.H1,K.H2,K.H3,K.H4,K.H5,K.H6] and sluggify("".join((c.text for c in walk(n) if c.k is K.TEXT and "formatting" not in c.cls)))==heading:
+                                        SCENE.y = -n.y
+                                        frame.cursor.update_location(next((c for c in walk(n) if c.k is K.TEXT and "formatting" not in c.cls)), 0, False)
                                         break
                         else: print(f"INVALID LINK: Target does not exist: {p}")
             # META
@@ -851,9 +858,9 @@ while not glfwWindowShouldClose(window):
                 while len(diff:=to_export.difference(seen)) > 0:
                     for filepath in diff:
                         if filepath.suffix == ".md": # convert to html and get additional files this points to
-                            with open(filepath, "r") as f: markdown = parse((t:=f.read()), Node(K.BODY, None, text=t, title=filepath.stem))
+                            with open(filepath, "r") as f: markdown = parse((t:=f.read()), Node(K.BODY, None, title=filepath.stem))
                             for n in walk(markdown):
-                                if n.k in [K.A, K.IMG] and not (href:=t[n.href[0]:n.href[1]]).startswith(("http://", "https://")):
+                                if n.k in [K.A, K.IMG] and not (href:=n.href).startswith(("http://", "https://")):
                                     if n.k is K.A:
                                         path, heading = (href, "") if (hashidx:=href.rfind("#")) == -1 else (href[:hashidx], href[hashidx+1:])
                                         try: href = filepath.parent.joinpath(path).resolve() if path != "" else filepath.resolve()
@@ -877,43 +884,44 @@ while not glfwWindowShouldClose(window):
                 print("Fully exported:", *sorted(targets, key=lambda x: x.suffix), sep="\n    ")
 
             elif name == "export":
-                with open(TEXTPATH.parent.joinpath(f"{TEXTPATH.stem}.html").resolve(), "w") as f: f.write(serialize(frame, Path(CSSPATH), TEXTPATH))
+                with open((out:=TEXTPATH.parent.joinpath(f"{TEXTPATH.stem}.html").resolve()), "w") as f: f.write(serialize(frame, Path(CSSPATH), TEXTPATH))
+                print(f"Exported to {out}")
             elif name == "save":
-                with open(TEXTPATH, "w") as f: f.write(frame.text)
+                with open(TEXTPATH, "w") as f: f.write("".join((n.text for n in walk(frame) if n.k is K.TEXT)))
                 glfwSetWindowTitle(window, TEXTPATH.name.encode())
+                SCENEY = SCENE.y
+                CURSORIDX = frame.cursor.get_index()
+                CURSOR_POST_WRAP = frame.cursor.post_wrap
             else: raise NotImplementedError(name, *data)
             
             if name.startswith(("cursor_left", "erase_left")): up = False
             
         if reparse: text_update(frame)
-        frame.cursor.selection = cursor_selection.copy()
-        frame.cursor.update(cursor, selection=bool(cursor_selection), up=up and cursor in frame.wraps)
-        if clipboard: glfwSetClipboardString(window, clipboard.encode()) # copy
+        frame.cursor.update_render_data()
 
     if SS.resized:
         SCENE.x = max(0, (SS.w - frame.w)/2)
         SS.resized = False
         glViewport(0, 0, SS.w, SS.h)
-        populate_render_data(frame, SS.css, reset=True)
-        frame.cursor.update(frame.cursor.idx, up=up)
+        populate_render_data(frame, SS.css)
+        frame.cursor.update_render_data()
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
     scale, offset = (2 / SS.w, -2 / SS.h), tuple(vec2(-1 + SCENE.x * 2 / SS.w, 1 + SCENE.y * -2 / SS.h).components())
 
     SS.quad_buffer_bg.draw(scale, offset)
-    SS.quad_buffer_cursor.draw(scale, offset)
     SS.quad_buffer_selection.draw(scale, offset)
-
     SS.glyph_buffer.draw(scale, offset)
+    SS.quad_buffer_cursor.draw(scale, offset)
+
     for b in SS.img_buffers: b.draw(scale, offset)
     
     if (error:=glGetError()) != GL_NO_ERROR: print(f"OpenGL Error: {hex(error)}")
 
     glfwSwapBuffers(window)
 
-with open(WORKSPACEPATH, "w") as f: json.dump({"textpath": TEXTPATH.as_posix(), "sceney": SCENE.y, "cursoridx":frame.cursor.idx,
-                                               "cursorup": frame.cursor.idx == frame.cursor.node.end}, f)
+with open(WORKSPACEPATH, "w") as f: json.dump({"textpath": TEXTPATH.as_posix(), "sceney": SCENEY, "cursoridx": CURSORIDX, "cursor_post_wrap": CURSOR_POST_WRAP}, f)
 
 if SAVE_GLYPHATLAS: Image.write(list(reversed(SS.glyphAtlas.bitmap)), Path(__file__).parent / "GlyphAtlas.bmp")
 

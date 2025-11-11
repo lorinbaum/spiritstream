@@ -1,9 +1,9 @@
 from enum import Enum, auto
 from dataclasses import dataclass
-from typing import List, Optional, Union, Generator, Any, Iterable, Dict, Tuple
+from typing import Optional, Iterator, Any, Iterable
 from spiritstream.helpers import SPACES
 from pathlib import Path
-import re, os, time
+import re, os, time, functools
 
 PATTERN = re.compile("|".join([
     r"^(?P<codeblock>```[\s\S]*?\n```\n|~~~[\s\S]*?\n~~~\n)",
@@ -13,6 +13,7 @@ PATTERN = re.compile("|".join([
     r"^ {0,3}(?P<heading>#+)[\t ]+",
     r"^ {0,3}(?P<blockquote_line>>+)",
     r"(?P<new_line>\n)",
+    r"^(?P<toc>(?<!\\)\[TOC\]$)",
     r"^ {0,3}(?P<paragraph_line>)(?=[^\n])",
 
     r"(?P<emphasis>(?<!\\)\*+)",
@@ -24,20 +25,18 @@ PATTERN = re.compile("|".join([
     r"(?P<markdownlink_switch>(?<!\\)\]\()",
     r"(?P<wikilink_end>(?<![\\\]])\]\])",
 
-    r"(?P<opening_parenthesis>(?<!\\)\()",
     r"(?P<closing_parenthesis>(?<!\\)\))",
 
-    r"(?P<double_inline_code>(?<![`\\])``(?=[^`]))",
-    r"(?P<inline_code>(?<![\\])`(?=[^`]))", # no negative lookbehind for another ` because that would already have matched with double_inline_code
+    r"(?P<double_inline_code>(?<![`\\])``)",
+    r"(?P<inline_code>(?<![\\])`)", # no negative lookbehind for another ` because that would already have matched with double_inline_code
 ]), re.MULTILINE)
 
 @dataclass(frozen=True)
 class Token:
     name:str
-    start:int
-    end:int
+    text:str
     data:Any = None
-    def __repr__(self): return f"Token({self.name}, {self.start}, {self.end}, {self.data})"
+    def __repr__(self): return f"Token({self.name}, {repr(self.text)}, {self.data})"
 
 
 class K(Enum): # Kind of node
@@ -49,6 +48,7 @@ class K(Enum): # Kind of node
     ANY = auto() # used for CSS selectors
 
     BODY = auto()
+    TOC = auto()
     H1, H2, H3, H4, H5, H6 = auto(), auto(), auto(), auto(), auto(), auto()
     B, I = auto(), auto()
     A, IMG = auto(), auto()
@@ -64,7 +64,7 @@ INLINE_NODES = {K.B, K.I, K.A, K.IMG, K.CODE, K.TEXT, K.LINE}
 LINKS = {K.A, K.IMG}
 
 class Node:
-    def __init__(self, k:K, parent:"Node", children:List["Node"]=None, data:Dict=None, **kwargs):
+    def __init__(self, k:K, parent:"Node", children:list["Node"]=None, data:dict=None, **kwargs):
         self.k, self.parent = k, parent
         if children: # for easier notation when creating nested stuff
             for c in children: c.parent = self
@@ -90,10 +90,10 @@ class Node:
     
     def __repr__(self): return  f"\033[32m{self.k.name}\033[0m("+", ".join([f"\033[94m{k}=\033[0m{self._format(v)}" for k,v in self.data.items()]) + ")"
 
-def tokenize(text:str) -> Generator[Token, None, None]:
+def tokenize(text:str) -> Iterator[Token]:
     i = 0
     for m in PATTERN.finditer(text):
-        if m.start() > i: yield Token("text", i, m.start())
+        if m.start() > i: yield Token("text", text[i:m.start()])
         i = m.end()
         for name, value in m.groupdict().items():
             if value is not None:
@@ -120,106 +120,123 @@ def tokenize(text:str) -> Generator[Token, None, None]:
                     case "emphasis":
                         data = ((s0:=text[max(0, m.start()-1):m.start()]).isspace() or s0=="", (s1:=text[m.end():m.end()+1]).isspace() or s1=="")
                     case _: data = None
-                yield Token(name, m.start(), m.end(), data)
+                yield Token(name, m.group(), data)
                 break
-    if i < len(text): yield Token("text", i, len(text))
-    # HACK: cursor positioning will look for nodes with start <= idx < end so last node ends 1 beyond
-    yield Token("new_line", len(text), len(text)+1) 
+    if i < len(text): yield Token("text", text[i:])
 
 def treeify(tokens:Iterable[Token], head=None) -> Node:
-    # TODO: BODY start=0 is not guaranteed if the text has a head
-    node = head = Node(K.BODY, None, start=0) if head is None else head # node stores what I am currently adding to aka. most recently unclosed
+    node = head = Node(K.BODY, None) if head is None else head # node stores what I am currently adding to aka. most recently unclosed
     for tok in tokens:
-        in_link = any((n.k in LINKS for n in (node, *parents(node))))
-        linknode = next((n for n in (node, *parents(node)) if n.k in LINKS)) if in_link else None
         in_code = any((n.k is K.CODE for n in (node, *parents(node))))
+        in_link = any((n.k in LINKS for n in (node, *parents(node)))) and not in_code
+        linknode = next((n for n in (node, *parents(node)) if n.k in LINKS)) if in_link else None
         match tok.name:
             case "new_line":
-                if node is head: node.children.append(Node(K.EMPTY_LINE, head, [Node(K.TEXT, None, start=tok.start, end=tok.end)], start=tok.start, end=tok.end))
-                if (n:=next((n for n in (node, *parents(node)) if n.k in [K.BLOCKQUOTE, K.HR] or n.k is K.CODE and "block" in n.cls), None)): add_text(n, tok.start, tok.end)
-                while node is not head: node = end_node(node, tok.end)
-            case "heading": node = start_node(Node(getattr(K, f"H{min(tok.data, 6)}"), head, start = tok.start))
+                if node is head: node = start_node(Node(K.EMPTY_LINE, head))
+                add_text(node, tok.text)
+                while node is not head: node = end_node(node)
+            case "heading":
+                node = start_node(Node(getattr(K, f"H{min(tok.data, 6)}"), head))
+                add_text(node, tok.text, formatting=True)
             case "paragraph_line":
-                if node is head and (not node.children or node.children[-1].k is not K.P): node, start = start_node(Node(K.P, head, start = tok.start)), tok.start
-                else: node, start = node.children[-1], tok.start - 1 # includeget \n
-                add_text(node, start, tok.end) # add any indent captured in the paragraph line token
-            case "horizontal_rule": node = start_node(Node(K.HR, node, start=tok.start, end=tok.end))
+                if node is head and (not node.children or node.children[-1].k is not K.P): node = start_node(Node(K.P, head))
+                else: node = node.children[-1]
+                if tok.text != "": add_text(node, tok.text) # add any indent captured in the paragraph line token
+            case "horizontal_rule":
+                node = start_node(Node(K.HR, node))
+                add_text(node, tok.text, formatting=True)
             case "codeblock": 
-                node = start_node(Node(K.CODE, head, start=tok.start, end=tok.end, language=tok.data[0], cls=["block"]))
+                node = start_node(Node(K.CODE, head, language=tok.data[0], cls=["block"]))
                 codeblock = node
-                node = start_node(Node(K.P, node, start=tok.start, end=tok.start+tok.data[1]+1, cls=["code_language"]))
-                add_text(node, tok.start+3, tok.start+tok.data[1] + 1) # \n
-                add_text(codeblock, tok.start + tok.data[1]+1, tok.end - 4)
-                node = start_node(Node(K.P, codeblock, start=tok.end-4, end=tok.end))
-                add_text(node, tok.end-1, tok.end)
+                node = start_node(Node(K.P, node, cls=["code_language"]))
+                add_text(node, tok.text[:3], formatting=True) # ```
+                add_text(node, tok.text[3:tok.data[1]+1]) # \n
+                add_text(codeblock, tok.text[tok.data[1]+1:-4])
+                node = start_node(Node(K.P, codeblock))
+                add_text(node, tok.text[-4:-1], formatting=True)# ```
+                add_text(node, tok.text[-1:]) # \n
                 node = head # prevent merging with following blocks
             case "indented_line" if tok.data >= 4:
                 while node.children: node = node.children[-1] # get latest node
                 node = next((n for n in (node, *parents(node)) if n.k is K.CODE and "block" in n.cls), None)
-                if node is None: node = start_node(Node(K.CODE, head, start=tok.start, cls=["block"]))
-                add_text(node, tok.start + tok.data, tok.end)
+                if node is None: node = start_node(Node(K.CODE, head, cls=["block"]))
+                add_text(node, tok.text[:tok.data], formatting=True)
+                add_text(node, tok.text[tok.data:])
             case "blockquote_line":
                 while node.children: node = node.children[-1] # get latest node
                 node = next((n for n in (node, *parents(node)) if n.k is K.BLOCKQUOTE), None)
-                if not node: node = start_node(Node(K.BLOCKQUOTE, head, start = tok.start, depth = 1))
-                while node.depth < tok.data: node = start_node(Node(K.BLOCKQUOTE, node, start = tok.start, depth = node.depth + 1))
-                while node.k is K.BLOCKQUOTE and node.depth > tok.data: node = end_node(node, tok.start)
+                if not node: node = start_node(Node(K.BLOCKQUOTE, head, depth = 1))
+                while node.depth < tok.data: node = start_node(Node(K.BLOCKQUOTE, node, depth = node.depth + 1))
+                while node.k is K.BLOCKQUOTE and node.depth > tok.data: node = end_node(node)
+                add_text(node, tok.text, formatting=True)
             case "listitem":
                 newindent, newlisttype, digit = tok.data
                 while node.children: node = node.children[-1] # get latest node
                 listnode = next((n for n in (node, *parents(node)) if n.k in (K.UL, K.OL)), None)
                 if listnode is None:
                     if newindent >= 4: # not a list item but an indented line
-                        if not (node.k is K.CODE and "block" in node.cls): node = start_node(Node(K.CODE, head, start = tok.start, cls=["block"]))
-                        add_text(node, tok.start + newindent, tok.end)
+                        if not (node.k is K.CODE and "block" in node.cls): node = start_node(Node(K.CODE, head, cls=["block"]))
+                        add_text(node, tok.text[:4], formatting=True)
+                        add_text(node, tok.text[4:])
                     else:
-                        node = start_node(Node(newlisttype, head, indent=newindent, start=tok.start))
-                        node = start_node(Node(K.LI, node, start = tok.start, digit = digit))
+                        node = start_node(Node(newlisttype, head, indent=newindent))
+                        node = start_node(Node(K.LI, node, digit = digit))
+                        add_text(node, tok.text, formatting=True)
                 else:
                     if listnode.indent < newindent:
                         if listnode.children: node = next((n for n in (node, *parents(node)) if n.k is K.LI))
-                        else: node = start_node(Node(K.LI, listnode, start = tok.start))
-                        node = listnode = start_node(Node(newlisttype, node, start = tok.start, indent = newindent))
+                        else: node = start_node(Node(K.LI, listnode))
+                        node = listnode = start_node(Node(newlisttype, node, indent = newindent))
                     node = listnode
                     while listnode.indent > newindent:
-                        node = end_node(listnode, tok.start)
+                        node = end_node(listnode)
                         assert node.k is K.LI
-                        listnode = node = end_node(node, tok.start)
+                        listnode = node = end_node(node)
                     if listnode.k is not newlisttype:
-                        node = end_node(node, tok.start)
-                        node = listnode = start_node(Node(newlisttype, node, start = tok.start, indent = newindent))
-                    node = start_node(Node(K.LI, node, start = tok.start, digit = digit))
+                        node = end_node(node)
+                        node = listnode = start_node(Node(newlisttype, node, indent = newindent))
+                    node = start_node(Node(K.LI, node, digit = digit))
+                    add_text(node, tok.text, formatting=True)
             
-            case "wikilink_embed_start" if not in_link and not in_code: node = start_node(Node(K.IMG, node, start = tok.start, linktype = "wiki"))
-            case "wikilink_start" if not in_link and not in_code: node = start_node(Node(K.A, node, start = tok.start, linktype = "wiki"))
-            case "wikilink_end" if in_link and not in_code:
-                linknode = next((n for n in (node, *parents(node)) if n.k in LINKS))
-                if linknode.linktype == "wiki":
-                    if linknode.children: linknode.href = (linknode.children[0].start, linknode.children[-1].end)
-                    linknode.children = []
-                    if linknode.k is K.A: add_text(linknode, node.start+2, tok.start)
-                    while node is not linknode.parent: node = end_node(node, tok.end)
-                else: node.linktype = "md switch" # this token can end markdownlinks too. data is used when parsing next token to see if conditions for a full switch are satisfied
-            case "markdownlink_embed_start" if not in_link and not in_code: node = start_node(Node(K.IMG, node, start = tok.start, linktype = "md"))
-            case "markdownlink_start" if not in_link and not in_code: node = start_node(Node(K.A, node, start = tok.start, linktype = "md"))
-            case "markdownlink_switch" if in_link and not in_code:
-                if linknode.linktype == "wiki": # can switch wikilinks too in cases like [[link](link) the first [ is ignored, so start is shifted
-                    shift = 1 if linknode.k is K.A else 2 # if k.IMG, there is a "!" that is being ignored too
-                    if len(linknode.parent.children) > 1 and (n:=linknode.parent.children[-2].k is K.TEXT) and n.end == linknode.start: n.end += shift
-                    else: linknode.parent.children.insert(-1, Node(K.TEXT, linknode.parent, start = linknode.start, end = linknode.start + shift))
-                    linknode.start += 1 if linknode.k is K.A else 2 # if k.IMG, there is a "!" that is being ignored too
-                    linknode.k = K.A
-                linknode.linktype = "md switched" 
-                linknode.switchidx = len(linknode.children) # used when closing link to determine children that form url part of the link
+            case "toc":
+                node = start_node(Node(K.TOC, head))
+                add_text(node, tok.text, formatting=True)
+            
+            case "wikilink_embed_start" if not in_link:
+                node = start_node(Node(K.IMG, node, linktype = "wiki"))
+                add_text(node, tok.text, formatting=True)
+            case "wikilink_start" if not in_link:
+                node = start_node(Node(K.A, node, linktype = "wiki"))
+                add_text(node, tok.text, formatting=True)
+            case "wikilink_end" if in_link and linknode.linktype == "wiki":
+                if len(linknode.children) > 1: linknode.href = "".join((rc.text for c in linknode.children[1:] for rc in walk(c) if rc.k is K.TEXT))
+                else: linknode.href = ""
+                if linknode.k is K.IMG: linknode.children = [Node(K.TEXT, linknode, text=linknode.children[0].text+linknode.href, cls=["formatting"])]
+                else: linknode.children[1:] = [Node(K.TEXT, linknode, text=linknode.href, cls=[])]
+                add_text(linknode, tok.text, formatting=True)
+                node = end_node(linknode)
+            case "markdownlink_embed_start" if not in_link:
+                node = start_node(Node(K.IMG, node, linktype = "md"))
+                add_text(node, tok.text, formatting=True)
+            case "markdownlink_start" if not in_link:
+                node = start_node(Node(K.A, node, linktype = "md"))
+                add_text(node, tok.text, formatting=True)
+            case "markdownlink_switch" if in_link and linknode.linktype == "md":
+                while node is not linknode: node = end_node(node)
+                add_text(node, tok.text, formatting=True)
+                node.linktype = "md switched"
         
-            case "opening_parenthesis" if in_link and not in_code and linknode.linktype == "md switch": linknode.linktype, linknode.switchidx = "md switched", len(linknode.children)
-            case "closing_parenthesis" if in_link and not in_code and linknode.linktype == "md switched":
-                linknode.href = None if len(linknode.children) == linknode.switchidx else (linknode.children[linknode.switchidx].start, linknode.children[-1].end)
-                if linknode.k is K.A: linknode.children = linknode.children[:linknode.switchidx] # remove children that were part of the link
-                else:
-                    linknode.alt = (linknode.children[0].start, linknode.children[0].end)
-                    linknode.children = []
-                while node is not linknode.parent: node = end_node(node, tok.end)
+            # case "opening_parenthesis" if in_link and linknode.linktype == "md switch": linknode.linktype, linknode.switchidx = "md switched", len(linknode.children)
+            case "closing_parenthesis" if in_link and linknode.linktype == "md switched":
+                switch_idx = next((len(linknode.children)-1-i for i,n in enumerate(reversed(linknode.children)) if "formatting" in n.cls))
+                linknode.href = "".join((rc.text for c in linknode.children[switch_idx+1:] for rc in walk(c) if rc.k is K.TEXT))
+                linknode.children = linknode.children[:switch_idx+1] # remove children that were part of the link
+                if linknode.k is K.IMG:
+                    linknode.alt = "".join((rc.text for c in linknode.children[1:switch_idx] for rc in walk(c) if rc.k is K.TEXT))
+                    linknode.children[:switch_idx+1] = [
+                        Node(K.TEXT, linknode, text=linknode.children[0].text+linknode.alt+linknode.children[switch_idx].text, cls=["formatting"])]
+                add_text(linknode, linknode.href+tok.text, formatting=True)
+                node = end_node(linknode)
 
             case _ if not in_link or node.linktype == "md": # inline formatting only allowed outside of links except in the label part of a markdown link                
                 in_italic, in_bold = map(lambda k: any((n.k is k for n in (node, *parents(node)))), (K.I, K.B))
@@ -230,119 +247,131 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
                 match tok.name:
                     case "emphasis" if not in_code:
                         before, _after = tok.data # whether space before / after. after is recalculated based on how far along I am in the emphasis
-                        emphasis = tok.end - tok.start
+                        emphasis = len(tok.text)
                         while emphasis > 0:
                             emphasisnode = next((n for n in (node, *parents(node)) if n.k in [K.I, K.B]), None)
                             if emphasisnode and not before:
                                 if emphasisnode.k is K.B:
                                     if emphasis >= 2:
-                                        while node is not emphasisnode: node = end_node(node, tok.end-emphasis)
+                                        while node is not emphasisnode: node = end_node(node)
                                         emphasis -= 2
-                                        node = end_node(node, tok.end-emphasis)
+                                        add_text(node, tok.text[-emphasis-2:(-emphasis if -emphasis<0 else len(tok.text))], formatting=True)
+                                        node = end_node(node)
                                     else:
                                         if italicnode:=next((n for n in (node, *parents(node)) if n.k is K.I), None):
-                                            while node is not italicnode: node = end_node(node, tok.end-emphasis)
+                                            while node is not italicnode: node = end_node(node)
                                             emphasis -= 1
-                                            node = end_node(node, tok.end-emphasis)
-                                            node = start_node(Node(K.B, node, start=tok.end-emphasis)) # continue overlappping bold node
+                                            add_text(node, tok.text[-emphasis-1:(-emphasis if -emphasis<0 else len(tok.text))], formatting=True)
+                                            node = end_node(node)
+                                            node = start_node(Node(K.B, node)) # continue overlapping bold node
                                         else:
                                             if not _after or emphasis > 1: # can start nodes
-                                                node = start_node(Node(K.I, node, start=tok.end-emphasis))
+                                                node = start_node(Node(K.I, node))
                                                 emphasis -= 1
+                                                add_text(node, tok.text[-emphasis-1:(-emphasis if -emphasis<0 else len(tok.text))], formatting=True)
                                             else:
-                                                add_text(node, tok.end-emphasis, tok.end-emphasis+1)
                                                 emphasis -= 1
+                                                add_text(node, tok.text[-emphasis-1:(-emphasis if -emphasis < 0 else len(tok.text))])
                                 elif emphasis >= 2 and (boldnode:=next((n for n in (node, *parents(node)) if n.k is K.B), None)):
-                                    while node is not boldnode: node = end_node(node, tok.end-emphasis)
+                                    while node is not boldnode: node = end_node(node)
                                     emphasis -= 2
-                                    node = end_node(node, tok.end-emphasis)
-                                    node = start_node(Node(K.I, node, start=tok.end-emphasis)) # continue overlapping italic node
+                                    add_text(node, tok.text[-emphasis-2:(-emphasis if -emphasis<0 else len(tok.text))], formatting=True)
+                                    node = end_node(node)
+                                    node = start_node(Node(K.I, node)) # continue overlapping italic node
                                 elif emphasis >= 2 and not boldnode and ((not _after and emphasis == 2) or emphasis > 2):
-                                    node = start_node(Node(K.B, node, start=tok.end-emphasis))
+                                    node = start_node(Node(K.B, node))
                                     emphasis -= 2
+                                    add_text(node, tok.text[-emphasis-2:(-emphasis if -emphasis<0 else len(tok.text))], formatting=True)
                                 else: # K.I
-                                    while node is not emphasisnode: node = end_node(node, tok.end-emphasis)
+                                    while node is not emphasisnode: node = end_node(node)
                                     emphasis -= 1
-                                    node = end_node(node, tok.end-emphasis)
+                                    add_text(node, tok.text[-emphasis-1:(-emphasis if -emphasis<0 else len(tok.text))], formatting=True)
+                                    node = end_node(node)
                             else:
                                 if (not _after and emphasis == 2) or emphasis > 2:
-                                    node = start_node(Node(K.B, node, start=tok.end-emphasis))
+                                    node = start_node(Node(K.B, node))
                                     emphasis -= 2
+                                    add_text(node, tok.text[-emphasis-2:(-emphasis if -emphasis<0 else len(tok.text))], formatting=True)
                                 elif (not _after and emphasis == 1) or emphasis > 1:
-                                    node = start_node(Node(K.I, node, start=tok.end-emphasis))
+                                    node = start_node(Node(K.I, node))
                                     emphasis -= 1
+                                    add_text(node, tok.text[-emphasis-1:(-emphasis if -emphasis<0 else len(tok.text))], formatting=True)
                                 else:
                                     if emphasis >= 2:
-                                        add_text(node, tok.end-emphasis, tok.end-emphasis+2)
                                         emphasis -= 2
+                                        add_text(node, tok.text[-emphasis-2:(-emphasis if -emphasis<0 else len(tok.text))])
                                     else:
-                                        add_text(node, tok.end-emphasis, tok.end-emphasis+1)
                                         emphasis -= 1
+                                        add_text(node, tok.text[-emphasis-1:(-emphasis if -emphasis<0 else len(tok.text))])
                                 before = False # future emphasis not preceded my space anymore
 
                     case "double_inline_code":
                         if in_code and codenode.type == "double":
-                            while node is not codenode: node = end_node(node, tok.start)
-                            node = end_node(node, tok.end)
+                            while node is not codenode: node = end_node(node)
+                            add_text(node, tok.text, formatting=True)
+                            node = end_node(node)
                         elif in_code and codenode.type == "single":
-                            while node is not codenode: node = end_node(node, tok.start)
-                            node = end_node(node, tok.end)
+                            while node is not codenode: node = end_node(node)
+                            add_text(node, tok.text[:1], formatting=True)
+                            node = end_node(node)
                             # HACK: assigning list to cls necessary because using '"block" in node.cls' elsewhere, so expects list
-                            node = start_node(Node(K.CODE, node, start=tok.start + 1, type="single", cls=[])) 
-                        else: node = start_node(Node(K.CODE, node, start=tok.start, type="double", cls=[]))
+                            node = start_node(Node(K.CODE, node, type="single", cls=[])) 
+                            add_text(node, tok.text[1:], formatting=True)
+                        else:
+                            node = start_node(Node(K.CODE, node, type="double", cls=[]))
+                            add_text(node, tok.text, formatting=True)
 
                     case "inline_code" if not (in_code and codenode.type == "double"):
                         if in_code and codenode.type == "single":
-                            while node is not codenode: node = end_node(node, tok.start)
-                            node = end_node(node, tok.end)
-                        elif not in_code: node = start_node(Node(K.CODE, node, start=tok.start, type="single", cls=[]))
-                    case _: add_text(node, tok.start, tok.end) # no valid match means it should be treated as text
-            case _: add_text(node, tok.start, tok.end) # no valid match means it should be treated as text
+                            while node is not codenode: node = end_node(node)
+                            add_text(node, tok.text, formatting=True)
+                            node = end_node(node)
+                        elif not in_code:
+                            node = start_node(Node(K.CODE, node, type="single", cls=[]))
+                            add_text(node, tok.text, formatting=True)
+                    case _: add_text(node, tok.text) # no valid match means it should be treated as text
+            case _: add_text(node, tok.text) # no valid match means it should be treated as text
+    # true if file is empty or the file ends with a newline. adds an empty line so that there is a cursor position.
+    if node is head: head.children.append(Node(K.EMPTY_LINE, head, [Node(K.TEXT, None, text="", cls=[])]))
+    while node is not head: node = end_node(node)
     return head
 
 def parse(text:str, head=None) -> Node: return treeify(tokenize(text), head)
 
-def add_text(node:Node, start:int, end:int):
-    """Merges with existing overlapping TEXT nodes if any or inserts a new text node. Does not fix existing adjacent text outside of start, end"""
-    if start < end:
-        overlaps = [(i, n) for (i, n) in enumerate(node.children) if n.k is K.TEXT and not (n.end < start or n.start > end)]
-        start, end = min((start, *(n.start for _, n in overlaps))), max((end, *(n.end for _, n in overlaps)))
-        for _, n in overlaps: node.children.remove(n)
-        node.children.insert(min((len(node.children), *(i for i,_ in overlaps))), Node(K.TEXT, node, start=start, end=end))
+def add_text(node, text:str, formatting=False):
+    if node.children and node.children[-1].k is K.TEXT and (isinstance(node.children[-1].cls, list) and "formatting" in node.children[-1].cls) == formatting:
+        node.children[-1].text += text
+    else: node.children.append(Node(K.TEXT, node, text=text, cls=["formatting"] if formatting else []))
 
 def start_node(child:Node) -> Node: child.parent.children.append(child); return child
 
-def end_node(node:Node, end:int) -> Node:
-    node.end = end
-    if not node.children and node.k not in [K.IMG]: # Invalid unless allowed to have no children
-        # when replacing block node, don't replace with TEXT but with P>TEXT
-        if node.parent and node.parent.k is K.BODY:
-            if end-node.start > 1: node.k, node.data = K.P, {"start":node.start, "end":end}
-            else: node.k, node.data = K.EMPTY_LINE, {"start":node.start, "end":end}
-                # HACK if this is triggered from end of file, typeset needs children to be ["node...", ""] instead of just ["node..."] so xs is correct
-            if end-node.start > 1:  node.children = [Node(K.TEXT, node, start=node.start, end=end-1), Node(K.TEXT, node, start=end-1, end=end)]
-            else: node.children = [Node(K.TEXT, node, start=node.start, end=end)]
-        else:
-            # HACK: k = K.TEXT and then add_text replaces this with new text node while allowing merging
-            node.k, node.data = K.TEXT, {"start": node.start, "end":end}
-    if node.k in LINKS and node.href is None: # invalid link
-        prev_end = node.start
-        for i, child in enumerate(node.children): # replace formatting text with text nodes
-            if child.start > prev_end: node.children.insert(i, Node(K.TEXT, node, start=prev_end, end=child.start))
-            prev_end = child.end
-        if node.children and child.end < node.end: node.children.append(Node(K.TEXT, node, start=child.end, end=node.end))
+def end_node(node:Node) -> Node:
+    if not node.children and node.k not in [K.IMG]: node.parent.children.remove(node) # Remove nodes that can't have no children
+    elif "".join((n.text for n in walk(node) if n.k is K.TEXT and "formatting" not in n.cls)) in "\n" and not any((n for n in walk(node) if n.k is K.IMG)) and node.k not in [K.IMG, K.TOC, K.EMPTY_LINE, K.HR] and not (node.k is K.CODE and "block" in node.cls): # or only have formatting text
+        t = "".join((n.text for n in walk(node) if n.k is K.TEXT))
+        if node.parent.k is K.BODY: node.k, node.children = K.P, [Node(K.TEXT, node, text=t, cls=[])]
+        else: node.k, node.children, node.text, node.cls = K.TEXT, [], t, []
+    elif node.k in LINKS and node.href is None: # invalid link
+        # merge text nodes
+        if node.children[0].k is K.TEXT and "formatting" in node.children[0].cls: node.children[0].cls.remove("formatting")
+        for c0, c1 in zip(node.children, node.children[1:]):
+            if c1.k is K.TEXT and isinstance(c1.cls, list) and "formatting" in c1.cls: c1.cls.remove("formatting")
+            if c0.k is c1.k is K.TEXT:
+                c1.text = c0.text + c1.text
+                node.children.remove(c0)
         # remove link node entirely
         steal_children(node, node.parent)
         node.parent.children.remove(node)
     return node.parent
 
-def check(head:Node):
+def check(head:Node) -> str:
+    ret = ""
     for node in walk(head):
         if node.children:
             for child in node.children: assert node is child.parent, f"{node=}, {node.children=}, {child.parent=}"
         if node.parent: assert any(node is c for c in node.parent.children)
-        if node.parent and node.parent.start and node.start: assert node.parent.start <= node.start
-        if node.parent and node.parent.end and node.end: assert node.parent.end >= node.end
+        if node.k is K.TEXT: ret += node.text
+    return ret
 
 def steal_children(parent:Node, thief:Node):
     for c in parent.children:
@@ -353,47 +382,59 @@ def steal_children(parent:Node, thief:Node):
 def parents(node:Node):
     while node.parent: yield (node:=node.parent)
 
-def walk(node, level=None, seen=None) -> Generator[Node, None, None]:
-    assert id(node) not in (seen := set() if seen is None else seen) or seen.add(id(node))
-    yield node if level is None else (node, level)
-    for n in getattr(node, "children", []): yield from walk(n, None if level is None else level+1, seen)
+def blockparent(node:Node): return next((p for p in (node, *parents(node)) if p.k not in INLINE_NODES))
+
+def walk(node, level=None, seen=None, reverse=False, siblings=False) -> Iterator[Node | tuple[Node, int]]:
+    if siblings:
+        while (p:=node.parent):
+            if node is (p.children[0] if reverse else p.children[-1]): node, level = p, None if level is None else level-1
+            else: yield from walk(node:=p.children[p.children.index(node) + (-1 if reverse else 1)], level, seen, reverse)
+    else:
+        assert id(node) not in ((seen := set()) if seen is None else seen)
+        seen.add(id(node))
+        yield node if level is None else (node, level)
+        children = getattr(node, "children", [])
+        for n in reversed(children) if reverse else children: yield from walk(n, None if level is None else level+1, seen, reverse=reverse)
 
 def show(node): [print(f"{' '*SPACES*l}{n}") for n,l in walk(node, level=0)]
 
 def find(node, **kwargs) -> Node: return next((n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))))
-def find_all(node, **kwargs) -> List[Node]: return [n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))]
+def find_all(node, **kwargs) -> list[Node]: return [n for n in walk(node) if all((getattr(n, k, None) == v for k,v in kwargs.items()))]
 
 def serialize(head:Node, csspath:Path, basepath:Path) -> str:
     """node tree to html"""
     ret = f"""<!DOCTYPE html><html><head><link rel="stylesheet" href="{os.path.relpath(str(csspath.resolve()), str(basepath.parent.resolve()))}"/>
     <title>{head.title if head.title else "Unnamed frame"}</title></head>"""
-    text = head.text
-    assert text is not None
     for n in walk(head) :
-        if n.k is K.TEXT and n.parent.k in [K.H1,K.H2,K.H3,K.H4,K.H5,K.H6]: n.parent.ids = [sluggify(text[n.start:n.end])]
+        if n.k in [K.H1,K.H2,K.H3,K.H4,K.H5,K.H6]:
+            n.ids = [sluggify("".join((c.text for c in walk(n) if c.k is K.TEXT and "formatting" not in c.cls)))]
     prevNode, prevLevel = None, -1
     for node, level in walk(head, level=0):
         if node.k not in [K.LINE, K.FRAME]:
             while prevLevel >= level:
-                ret += htmltag(prevNode, text, open=False)
+                ret += htmltag(prevNode, open=False)
                 assert prevNode.parent is not None
                 prevNode, prevLevel = prevNode.parent, prevLevel - 1
-            if node.k is K.TEXT: ret += text[node.start:node.end].replace("\n", "<br>")
+            if node.k is K.TEXT:
+                if "formatting" not in node.cls:
+                    if node is node.parent.children[-1] and node.parent.k not in (*INLINE_NODES, K.EMPTY_LINE, K.HR): ret += node.text.rstrip("\n").replace("\n", "<br>")
+                    else: ret += node.text.replace("\n", "<br>")
             else:
-                ret += htmltag(node, text, basepath=basepath)
+                ret += htmltag(node, basepath=basepath)
                 prevNode = node
                 prevLevel = level
     while prevNode is not head:
-        ret += htmltag(prevNode, text, open=False)
+        ret += htmltag(prevNode, open=False)
         prevNode = prevNode.parent
     return ret + "</html>"
 
-def htmltag(node:Node, text, open=True, basepath:Path=None) -> str:
+def htmltag(node:Node, open=True, basepath:Path=None) -> str:
     ret = ""
     match node.k:
         case K.EMPTY_LINE: pass
         case K.A:
-            if open and not (href:=text[node.href[0]:node.href[1]]).startswith(("http://", "https://")):
+            href = node.href
+            if open and not href.startswith(("http://", "https://")):
                 hashidx = href.rfind("#")
                 if hashidx == -1: path, heading = href, ""
                 else: path, heading = href[:hashidx], href[hashidx+1:]
@@ -401,7 +442,7 @@ def htmltag(node:Node, text, open=True, basepath:Path=None) -> str:
                 if href.suffix == ".md": href = href.parent.joinpath(f"{href.stem}.html")
                 href = os.path.relpath(href.as_posix(), basepath.parent.as_posix()) + (f"#{sluggify(heading)}" if heading else "")
             ret += f"<a href=\"{href}\"" if open else "</a>"
-        case K.IMG: ret += f"<img src=\"{basepath.parent.joinpath(text[node.href[0]:node.href[1]]).resolve()}\" />" if open else ""
+        case K.IMG: ret += f"<img src=\"{basepath.parent.joinpath(node.href).resolve()}\" />" if open else ""
         case K.HR: ret += "<hr>" if open else ""
         case _: ret += f"<{''if open else '/'}{node.k.name.lower()}{'' if open else '>'}"
     return ret if ret.endswith(">") or not open or ret == "" else ret + f"""{' class="' + ' '.join(node.cls) + '"' if node.cls else ''}\
@@ -435,7 +476,7 @@ CSS_PATTERN = re.compile("|".join([
 class CSSNode:
     name:str
     parent:Node
-    children:List[Node] = None
+    children:list[Node] = None
     data:Any = None
     status:Optional[str] = None
     def __repr__(self): return  f"\033[32m{self.__class__.__name__}\033[0m({self.name}, \033[94mdata=\033[0m{repr(self.data)})"
@@ -559,7 +600,7 @@ def color_from_hex(x:int) -> Color:
     elif x <= 0xffffff: return Color(((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255, 1.0)
     else: return Color(((x & 0xff000000) >> 24) / 255, ((x & 0xff0000) >> 16) / 255, ((x & 0xff00) >> 8) / 255, (x & 0xff) / 255)
 
-def css_to_dict(head:CSSNode) -> Dict:
+def css_to_dict(head:CSSNode) -> dict:
     css_dict = {}
     fonts = []
     font = {}
@@ -605,9 +646,9 @@ def css_to_dict(head:CSSNode) -> Dict:
 @dataclass(frozen=True)
 class Selector:
     k:K
-    cls:List[str] = None
-    ids:List[str] = None
-    pseudocls:List[str] = None
+    cls:list[str] = None
+    ids:list[str] = None
+    pseudocls:list[str] = None
 
 def selector_node(selector:str) -> Selector:
     tag = m.group() if (m:=re.match(r"[a-zA-Z]+[_a-zA-Z0-9\-]*", selector)) else "any"
@@ -619,7 +660,7 @@ def selector_node(selector:str) -> Selector:
 # NOTE: margin: 0, auto not supported because mix of identity and other
 # NOTE: margin: calc(100% - 5px) not supported
 
-def expand_css_shorthand(k, v) -> Tuple[Tuple, Tuple]:
+def expand_css_shorthand(k, v) -> tuple[tuple, tuple]:
     # process shorthands for padding and margin
     if k in ["padding", "margin"]:
         k = (k+"-top", k+"-right", k+"-bottom", k+"-left")
@@ -638,4 +679,4 @@ def expand_css_shorthand(k, v) -> Tuple[Tuple, Tuple]:
         return k, v
     return (k,), (v,)
 
-def parseCSS(text:str) -> Dict: return css_to_dict(tokenizeCSS(text))
+def parseCSS(text:str) -> dict: return css_to_dict(tokenizeCSS(text))
