@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from spiritstream.shader import Shader
 from spiritstream.textureatlas import TextureAtlas
 from spiritstream.helpers import CACHE_GLYPHATLAS, SAVE_GLYPHATLAS
-from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children, parents, serialize, sluggify, check, blockparent
+from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_from_hex, walk, show, INLINE_NODES, steal_children, parents, serialize, sluggify, check
 from spiritstream.buffer import BaseQuad, QuadBuffer, TexQuadBuffer
 import spiritstream.image as Image
 
@@ -59,19 +59,20 @@ class Cursor:
         show(self.frame)
         raise RuntimeError(f"No text node for index {idx} found")
     
-    def get_index(self) -> int:
-        assert self.node.k is K.TEXT and self.frame in parents(self.node)
+    def get_index(self, frame:Node=None, node:Node=None) -> int:
+        frame, node = self.frame if frame is None else frame, self.node if node is None else node
+        assert node.k is K.TEXT and frame in parents(node)
         ret = 0
-        for n in walk(self.frame):
+        for n in walk(frame):
             if n.k is K.TEXT:
-                if n is self.node: return ret + self.offset
+                if n is node: return ret + self.offset
                 else: ret += len(n.text)
-        raise RuntimeError(f"No text in {self.frame=}")
+        raise RuntimeError(f"No text in {frame=}")
 
     def _find_pos(self, pos:vec2, selection:bool):
         closest, dx, dy = None, math.inf, math.inf
         for c in walk(self.frame): # TODO can be more efficient if descending block node hitboxes before leafnodes only
-            if (not c.children and all((v is not None for v in [c.x, c.y, c.w, c.h]))) or c.k is K.IMG:
+            if c.k is K.LINE or (c.k is K.IMG and not any((n.k is K.LINE for n in walk(c)))):
                 if c.x <= pos.x < c.x + c.w and c.y <= pos.y < c.y + c.h:
                     closest = c # direct hit
                     break
@@ -79,7 +80,6 @@ class Cursor:
                 dyc = 0 if c.y <= pos.y <= c.y+c.h else min(abs(pos.y-c.y), abs(pos.y-(c.y+c.h)))
                 if dyc < dy: closest, dx, dy = c, dxc, dyc
                 elif dyc == dy and dxc < dx: closest, dx = c, dxc
-        show(self.frame)
         self._update_from_closest(closest, pos.x, selection)
 
     def _update_from_closest(self, closest:Node, x:int, selection:bool):
@@ -99,12 +99,11 @@ class Cursor:
         if self.post_wrap is True and a given offset is shared by two lines, updating render data will use the second line, else the first (default).
         """
         assert self.node.k is K.TEXT
-        show(self.node)
         # update edit view
         new_editnodes = set()
-        new_editnodes.add(next((p for p in (self.node, *parents(self.node)) if p.k not in INLINE_NODES)))
-        if self.offset == 0 and (prev:=self.prev()) is not None and blockparent(self.node) is blockparent(prev): new_editnodes.add(blockparent(prev))
-        if self.offset == len(self.node.text) and (nxt:=self.next()) is not None and blockparent(self.node) is blockparent(nxt): new_editnodes.add(blockparent(nxt))
+        new_editnodes.add(_find_edit_parent(self.node))
+        if self.offset == 0 and (prev:=self.prev()) is not None and _find_edit_parent(self.node) is _find_edit_parent(prev): new_editnodes.add(_find_edit_parent(prev))
+        if self.offset == len(self.node.text) and (nxt:=self.next()) is not None and _find_edit_parent(self.node) is _find_edit_parent(nxt): new_editnodes.add(_find_edit_parent(nxt))
         new_editnodes = set(filter(lambda node: not any((n.edit is Edit.GLOBAL for n in (node, *parents(node)))), new_editnodes))
 
         if self.selection:
@@ -114,7 +113,7 @@ class Cursor:
                 while (nxt:=next(gen, None)):
                     if nxt is self.selection.end.node: break
                     selected.add(nxt)
-            for n in (self.selection.start.node, *selected, self.selection.end.node): new_editnodes.add(blockparent(n))
+            for n in (self.selection.start.node, *selected, self.selection.end.node): new_editnodes.add(_find_edit_parent(n))
 
         if self.frame.editnodes != new_editnodes:
             for n in self.frame.editnodes: n.edit = False
@@ -152,7 +151,7 @@ class Cursor:
         # NOTE: if text content was modified, this is only safe to call if the text was also reparsed, else offset can be out of range of line xs.
         node, offset, post_wrap = map(lambda i: getattr(self, i[0]) if i[1] is None else i[1], (("node", node), ("offset", offset), ("post_wrap", post_wrap)))
         total, x = 0, None
-        if not node.children: show(self.frame)
+        if not (node.k is K.TEXT and node.children): raise RuntimeError()
         for l in node.children:
             if (post_wrap and (total+len(l.xs)-1) > offset) or (not post_wrap and (total+len(l.xs)-1) >= offset):
                 x = l.xs[offset-total]
@@ -244,7 +243,9 @@ class Cursor:
 
 def _in_edit_view(node:Node) -> bool: return _find_edit_parent(node).edit in [Edit.LOCAL, Edit.GLOBAL] or any((n.edit is Edit.GLOBAL for n in parents(node)))
  
-def _find_edit_parent(node:Node) -> Node: return next((n for n in (node, *parents(node)) if n.k not in INLINE_NODES or n.k is K.CODE and "block" in n.cls))
+def _find_edit_parent(node:Node) -> Node:
+    if (nxt:=next((n for n in (node, *parents(node)) if n.k is K.TOC), None)): return nxt
+    return next((n for n in (node, *parents(node)) if n.k not in INLINE_NODES or n.k is K.CODE and "block" in n.cls))
 
 @dataclass(frozen=True)
 class Location:
@@ -429,15 +430,6 @@ def _populate_render_data(node:Node, css_rules:dict, pstyle:dict=None) -> tuple[
             elif node.parent.k is K.OL:
                 typeset(d:=f"{node.digit}.", style["_inline"].x-(len(d)+0.5)*style["font-size"], y, style["font-size"]*len(d), style["font-family"],
                         style["font-size"]*1.05, style["font-weight"], style["color"], style["line-height"]*1.075, align="right")
-        # elif node.k is K.TOC:
-            # toclevel = None
-            # level = 0
-            # headings = []
-            # for n in walk(frame):
-            #     if n is node: toclevel = level
-            #     if n.k in [K.H1, K.H2, K.H3, K.H4, K.H5, K.H6]:
-            #         level = int(n.k.name[-1])
-            #         if toclevel is not None and level >= toclevel:
     else:
         style["_width"] = pstyle["_width"]
         style["_margin"] = vec2(style["margin-right"], 0)
@@ -628,7 +620,7 @@ def selector_match(sel:Selector, node:Node) -> bool: return all((
 ))
 
 def text_update(frame, text:str=None):
-    if text is None: idx, markdown = frame.cursor.get_index(), parse("".join((n.text for n in walk(frame) if n.k is K.TEXT)))
+    if text is None: idx, markdown = frame.cursor.get_index(), parse("".join((n.text for n in walk(frame, autogen=False) if n.k is K.TEXT)))
     else: idx, markdown = 0, parse(text)
     frame.children = [markdown]
     markdown.parent = frame
@@ -707,11 +699,11 @@ for font in SS.fonts:
     font["Font"] = Font(Path(CSSPATH).parent.joinpath(font["url"]).resolve())
 
 populate_render_data(frame, SS.css)
-show(SS)
+# show(SS)
 frame.cursor = Cursor(frame, idx=CURSORIDX, post_wrap=CURSOR_POST_WRAP) # after rendertree so it can find line elements in the tree
 check(SS)
 
-show(SS)
+# show(SS)
 
 while not glfwWindowShouldClose(window):
     # HACK: necessary to actually get multiple events if they accumulated (X11?)
@@ -887,7 +879,7 @@ while not glfwWindowShouldClose(window):
                 with open((out:=TEXTPATH.parent.joinpath(f"{TEXTPATH.stem}.html").resolve()), "w") as f: f.write(serialize(frame, Path(CSSPATH), TEXTPATH))
                 print(f"Exported to {out}")
             elif name == "save":
-                with open(TEXTPATH, "w") as f: f.write("".join((n.text for n in walk(frame) if n.k is K.TEXT)))
+                with open(TEXTPATH, "w") as f: f.write("".join((n.text for n in walk(frame, autogen=False) if n.k is K.TEXT)))
                 glfwSetWindowTitle(window, TEXTPATH.name.encode())
                 SCENEY = SCENE.y
                 CURSORIDX = frame.cursor.get_index()

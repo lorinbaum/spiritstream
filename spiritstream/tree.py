@@ -133,7 +133,7 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
         match tok.name:
             case "new_line":
                 if node is head: node = start_node(Node(K.EMPTY_LINE, head))
-                add_text(node, tok.text)
+                add_text(node, tok.text, node.k is K.TOC)
                 while node is not head: node = end_node(node)
             case "heading":
                 node = start_node(Node(getattr(K, f"H{min(tok.data, 6)}"), head))
@@ -334,6 +334,46 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
     # true if file is empty or the file ends with a newline. adds an empty line so that there is a cursor position.
     if node is head: head.children.append(Node(K.EMPTY_LINE, head, [Node(K.TEXT, None, text="", cls=[])]))
     while node is not head: node = end_node(node)
+
+    # POST PROCESSING
+    
+    # TOC
+    # collect tocs, headings
+    toced:list[Node, list[Node]] = []
+    tocing:list[Node, list[Node]] = []
+    for n in walk(head):
+        if n.k is K.TOC: tocing.append([n, []])
+        elif n.k in (K.H1, K.H2, K.H3, K.H4, K.H5, K.H6):
+            level = int(n.k.name[-1])
+            for i, (_, headings) in enumerate(tocing):
+                if len(headings) > 0 and level < int(headings[0].k.name[-1]): toced.append(tocing.pop(i))
+                headings.append(n)
+    toced.extend(tocing)
+    # populate tocs. done separately to avoid redundant tree walking
+    for toc, headings in toced:
+        toclevel = prevlevel = None
+        for h in headings:
+            level = int(h.k.name[-1])
+            if toclevel is None:
+                toclevel = prevlevel = level
+                new = Node(K.UL, toc, autogen=True)
+                toc.children.append(new)
+                toc = new
+            if level >= toclevel:
+                while level > prevlevel:
+                    if not toc.children:
+                        toc.children.append(Node(K.LI, toc))
+                    new = Node(K.UL, toc.children[-1])
+                    toc.children[-1].children.append(new)
+                    toc = new
+                    prevlevel += 1
+                while level < prevlevel:
+                    toc = toc.parent.parent
+                    assert toc.k is K.UL
+                heading_text = "".join((c.text for c in walk(h) if c.k is K.TEXT and not "formatting" in c.cls))
+                toc.children.append(Node(K.LI, toc, [Node(K.A, None, [Node(K.TEXT, None, text=heading_text, cls=[])], href=f"#{sluggify(heading_text)}")]))
+            else: break
+            prevlevel = level
     return head
 
 def parse(text:str, head=None) -> Node: return treeify(tokenize(text), head)
@@ -382,19 +422,25 @@ def steal_children(parent:Node, thief:Node):
 def parents(node:Node):
     while node.parent: yield (node:=node.parent)
 
-def blockparent(node:Node): return next((p for p in (node, *parents(node)) if p.k not in INLINE_NODES))
-
-def walk(node, level=None, seen=None, reverse=False, siblings=False) -> Iterator[Node | tuple[Node, int]]:
+def walk(node, level:int=None, seen:set=None, reverse:bool=False, siblings:bool=False, autogen:bool=True) -> Iterator[Node | tuple[Node, int]]:
+    """
+    Walks the tree, recursively yielding child nodes.
+    If level:int is provided, returns tuple[Node, int] instead of Node.
+    Raises AssertionError if it encounters a node that is already in seen.
+    If siblings is True, it continues the walk from node, ascending when siblings are exhausted, while skipping the node itself and its parents.
+    If autogen is True, will include nodes with the attribute autogen=True, else skips them.
+    """
     if siblings:
         while (p:=node.parent):
             if node is (p.children[0] if reverse else p.children[-1]): node, level = p, None if level is None else level-1
-            else: yield from walk(node:=p.children[p.children.index(node) + (-1 if reverse else 1)], level, seen, reverse)
+            else: yield from walk(node:=p.children[p.children.index(node) + (-1 if reverse else 1)], level, seen, reverse, autogen=autogen)
     else:
         assert id(node) not in ((seen := set()) if seen is None else seen)
         seen.add(id(node))
-        yield node if level is None else (node, level)
-        children = getattr(node, "children", [])
-        for n in reversed(children) if reverse else children: yield from walk(n, None if level is None else level+1, seen, reverse=reverse)
+        if autogen is True or node.autogen is not True:
+            yield node if level is None else (node, level)
+            children = getattr(node, "children", [])
+            for n in reversed(children) if reverse else children: yield from walk(n, None if level is None else level+1, seen, reverse, autogen=autogen)
 
 def show(node): [print(f"{' '*SPACES*l}{n}") for n,l in walk(node, level=0)]
 
