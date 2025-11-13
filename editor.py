@@ -137,7 +137,7 @@ class Cursor:
             l, x = self.get_line_x()
             # scroll into view
             if l.y + SCENE.y < 0: SCENE.y = -l.y
-            elif l.y + SCENE.y + self.node.h > SS.h: SCENE.y = SS.h - l.y - self.node.h
+            elif l.y + SCENE.y + l.h > SS.h: SCENE.y = SS.h - l.y - l.h
             # TODO: render only selection that is visible and watch out for edit mode causing flashing while scrolling.
             if self.selection:
                 c,p,z = SELECTION_COLOR, SELECTION_PADDING, SELECTION_Z
