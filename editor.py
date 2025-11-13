@@ -44,30 +44,42 @@ class Cursor:
         self.offset = None
         self.selection = None
         self.post_wrap = post_wrap
-        
+        self.autogen_len = None
+
         self._find_index(idx)
         self.update_render_data()
 
     def _find_index(self, idx):
+        """
+        Edit can cause additional changes in length of autogen content and so falsify idx. Counteract by keeping track of changes to autogen_len
+        before idx and redo with difference added to idx.
+        """
         total = 0
+        autogen_seen = set()
         for n in walk(self.frame):
+            if n.autogen is True:
+                for g in filter(lambda x: x.k is K.TEXT and x not in autogen_seen, walk(n)): autogen_seen.add(g)
             if n.k is K.TEXT:
                 if (total+len(n.text)) >= idx and not (idx-total == len(n.text) and n.text[idx-total-1:idx-total] == "\n"):
-                    self.node, self.offset, self.selection = n, idx - total, None
+                    self.autogen_len, old_autogen_len = sum((len(t.text) for t in autogen_seen)), self.autogen_len
+                    if self.autogen_len == old_autogen_len or old_autogen_len is None: self.node, self.offset, self.selection = n, idx - total, None
+                    else: self._find_index(idx+self.autogen_len-old_autogen_len)
                     return
                 total+=len(n.text)
         show(self.frame)
         raise RuntimeError(f"No text node for index {idx} found")
     
-    def get_index(self, frame:Node=None, node:Node=None) -> int:
-        frame, node = self.frame if frame is None else frame, self.node if node is None else node
-        assert node.k is K.TEXT and frame in parents(node)
+    def get_index(self) -> int:
+        assert self.node.k is K.TEXT and self.frame in parents(self.node)
         ret = 0
-        for n in walk(frame):
+        autogen_seen = set()
+        for n in walk(self.frame):
+            if n.autogen is True:
+                for g in filter(lambda x: x.k is K.TEXT and x not in autogen_seen, walk(n)): autogen_seen.add(g)
             if n.k is K.TEXT:
-                if n is node: return ret + self.offset
+                if n is self.node: return ret + self.offset, sum((len(t.text) for t in autogen_seen))
                 else: ret += len(n.text)
-        raise RuntimeError(f"No text in {frame=}")
+        raise RuntimeError(f"No text in {self.frame=}")
 
     def _find_pos(self, pos:vec2, selection:bool):
         closest, dx, dy = None, math.inf, math.inf
@@ -620,11 +632,12 @@ def selector_match(sel:Selector, node:Node) -> bool: return all((
 ))
 
 def text_update(frame, text:str=None):
-    if text is None: idx, markdown = frame.cursor.get_index(), parse("".join((n.text for n in walk(frame, autogen=False) if n.k is K.TEXT)))
-    else: idx, markdown = 0, parse(text)
+    if text is None: (idx, autogen_len), markdown = frame.cursor.get_index(), parse("".join((n.text for n in walk(frame, autogen=False) if n.k is K.TEXT)))
+    else: idx, autogen_len, markdown = 0, 0, parse(text)
     frame.children = [markdown]
     markdown.parent = frame
     populate_render_data(frame, SS.css)
+    frame.cursor.autogen_len = autogen_len
     frame.cursor._find_index(idx)
     glfwSetWindowTitle(window, (TEXTPATH.name + "*").encode())
 
@@ -879,7 +892,8 @@ while not glfwWindowShouldClose(window):
                 with open((out:=TEXTPATH.parent.joinpath(f"{TEXTPATH.stem}.html").resolve()), "w") as f: f.write(serialize(frame, Path(CSSPATH), TEXTPATH))
                 print(f"Exported to {out}")
             elif name == "save":
-                with open(TEXTPATH, "w") as f: f.write("".join((n.text for n in walk(frame, autogen=False) if n.k is K.TEXT)))
+                t = "".join((n.text for n in walk(frame, autogen=False) if n.k is K.TEXT))
+                with open(TEXTPATH, "w") as f: f.write(t)
                 glfwSetWindowTitle(window, TEXTPATH.name.encode())
                 SCENEY = SCENE.y
                 CURSORIDX = frame.cursor.get_index()

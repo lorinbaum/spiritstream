@@ -345,9 +345,9 @@ def treeify(tokens:Iterable[Token], head=None) -> Node:
         if n.k is K.TOC: tocing.append([n, []])
         elif n.k in (K.H1, K.H2, K.H3, K.H4, K.H5, K.H6):
             level = int(n.k.name[-1])
-            for i, (_, headings) in enumerate(tocing):
+            for i, (_, headings) in enumerate(tocing.copy()):
                 if len(headings) > 0 and level < int(headings[0].k.name[-1]): toced.append(tocing.pop(i))
-                headings.append(n)
+                else: headings.append(n)
     toced.extend(tocing)
     # populate tocs. done separately to avoid redundant tree walking
     for toc, headings in toced:
