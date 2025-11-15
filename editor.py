@@ -60,7 +60,7 @@ class Cursor:
             if n.autogen is True:
                 for g in filter(lambda x: x.k is K.TEXT and x not in autogen_seen, walk(n)): autogen_seen.add(g)
             if n.k is K.TEXT:
-                if (total+len(n.text)) >= idx and not (idx-total == len(n.text) and n.text[idx-total-1:idx-total] == "\n"):
+                if total+len(n.text) >= idx and not (idx-total == len(n.text) and n.text[idx-total-1:idx-total] == "\n"):
                     self.autogen_len, old_autogen_len = sum((len(t.text) for t in autogen_seen)), self.autogen_len
                     if self.autogen_len == old_autogen_len or old_autogen_len is None: self.node, self.offset, self.selection = n, idx - total, None
                     else: self._find_index(idx+self.autogen_len-old_autogen_len)
@@ -896,7 +896,7 @@ while not glfwWindowShouldClose(window):
                 with open(TEXTPATH, "w") as f: f.write(t)
                 glfwSetWindowTitle(window, TEXTPATH.name.encode())
                 SCENEY = SCENE.y
-                CURSORIDX = frame.cursor.get_index()
+                CURSORIDX, _ = frame.cursor.get_index()
                 CURSOR_POST_WRAP = frame.cursor.post_wrap
             else: raise NotImplementedError(name, *data)
             
