@@ -1,33 +1,68 @@
 """
-3 squares that I can move around
+- 3 squares that I can move around
+- toolbar with move, pan, zoom tools
 """
 from spiritstream.bindings.opengl import *
 from spiritstream.bindings.glfw import *
 from spiritstream.shader import Shader
-from spiritstream.buffer import BaseQuad, QuadBuffer
+from spiritstream.buffer import BaseQuad, QuadBuffer, TexQuadBuffer
+from spiritstream.tree import color_from_hex
 from spiritstream.vec import vec2
+import spiritstream.image as Image
 
 WIDTH = 1000
 HEIGHT = 1000
 RESIZED = True
 X = 0
 Y = 0
+SCALE = 1
 quads = set()
 DRAGGING = None
-DRAGGING_OFFSET = None
+DRAG_START = None
+X_START = Y_START = None
+SCALE_START = None
 QUADS_UPDATED = True
+UI_QUADS_UPDATED = True
+
+SELECTION_COLOR = color_from_hex(0x423024)
+
+ui_elements = set()
+ui_selected = None
 
 class Quad:
-    def __init__(self, x, y, z, width, height, red, green, blue, alpha=1.0):
-        self.x, self.y, self.z, self.w, self.h, self.r, self.g, self.b, self.a = x, y, z, width, height, red, green, blue, alpha
+    def __init__(self, buffer:QuadBuffer, x, y, z, width, height, red, green, blue, alpha=1.0):
+        self.buffer, self.x, self.y, self.z, self.w, self.h, self.r, self.g, self.b, self.a = buffer, x, y, z, width, height, red, green, blue, alpha
         self.update()
     def __setattr__(self, name, value):
         global QUADS_UPDATED
         QUADS_UPDATED = True
         super().__setattr__(name, value)
     def update(self):
-        quad.add([self.x, self.y, self.z, self.w, self.h, self.r, self.g, self.b, self.a])
+        self.buffer.add([self.x, self.y, self.z, self.w, self.h, self.r, self.g, self.b, self.a])
     def __repr__(self): return f"Quad(x={self.x}, y={self.y}, w={self.w}, h={self.h}, RGBA=({self.r},{self.g},{self.b},{self.a}))"
+
+class Button:
+    def __init__(self, x, y, w, h, icon_path:Path):
+        self.x, self.y, self.w, self.h = x, y, w, h
+        img = Image.read(icon_path)
+        texture = ctypes.c_uint()
+        glGenTextures(1, ctypes.byref(texture))
+        glBindTexture(GL_TEXTURE_2D, texture)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width, img.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.data)
+        self.tex_quad = TexQuadBuffer(base_quad, texture, img_shader)
+        self.tex_quad.add([x+4, y+4, 0, w-8, h-8])
+
+        self.quad = Quad(ui_quad, x, y, 0.1, w, h, (c:=SELECTION_COLOR).r, c.g, c.b, c.a)
+        ui_elements.add(self)
+    
+    def select(self):
+        global ui_selected, UI_QUADS_UPDATED
+        ui_selected = self
+        UI_QUADS_UPDATED = True
 
 @GLFWframebuffersizefun
 def framebuffer_size_callback(window, width, height):
@@ -41,25 +76,40 @@ def key_callback(window, key:int, scancode:int, action:int, mods:int):
 
 @GLFWcursorposfun
 def cursor_pos_callback(window, x, y):
-    global DRAGGING, DRAGGING_OFFSET
+    global DRAGGING, DRAG_START, X, Y, SCALE, X_START, Y_START
     if glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS:
         x, y = ctypes.c_double(), ctypes.c_double()
         glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-        if DRAGGING is not None is not DRAGGING_OFFSET:
-            DRAGGING.x = x.value - DRAGGING_OFFSET.x
-            DRAGGING.y = y.value - DRAGGING_OFFSET.y
+        x, y = x.value, y.value
+        drag_offset = vec2(x - DRAG_START.x, y - DRAG_START.y)
+        if ui_selected is move_button and DRAGGING is not None:
+            DRAGGING.x += drag_offset.x / SCALE
+            DRAGGING.y += drag_offset.y / SCALE
+            DRAG_START = vec2(x, y)
+        elif ui_selected is pan_button:
+            X += drag_offset.x
+            Y += drag_offset.y
+            DRAG_START = vec2(x, y)
+        elif ui_selected is zoom_button:
+            new_scale = 1.002**(drag_offset.x)
+            SCALE = SCALE_START * new_scale
+            X = DRAG_START.x + new_scale * (X_START-DRAG_START.x)
+            Y = DRAG_START.y + new_scale * (Y_START-DRAG_START.y)
 
 @GLFWmousebuttonfun
 def mouse_callback(window, button:int, action:int, mods:int):
     if button == GLFW_MOUSE_BUTTON_1:
-        global DRAGGING, DRAGGING_OFFSET
+        global DRAGGING, DRAG_START, X, Y, SCALE, SCALE_START, X_START, Y_START
         if action is GLFW_PRESS:
             x, y = ctypes.c_double(), ctypes.c_double()
             glfwGetCursorPos(window, ctypes.byref(x), ctypes.byref(y))
-            x, y = x.value, y.value
-            DRAGGING = next((q for q in quads if q.x<=x<=q.x+q.w and q.y<=y<=q.y+q.h), None)
-            if DRAGGING is not None: DRAGGING_OFFSET = vec2(x-DRAGGING.x, y-DRAGGING.y)
-        elif action == GLFW_RELEASE: DRAGGIN = DRAGGING_OFFSET = None
+            DRAG_START = vec2(x.value, y.value)
+            SCALE_START = SCALE
+            X_START, Y_START = X, Y
+            DRAGGING = next((q for q in quads if q.x<=(x.value-X)/SCALE<=q.x+q.w and q.y<=(y.value-Y)/SCALE<=q.y+q.h), None)
+            for e in ui_elements:
+                if e.x<=x.value<=e.x+e.w and e.y<=y.value<=e.y+e.h: e.select()
+        elif action == GLFW_RELEASE: DRAGGING = DRAG_START = SCALE_START = X_START = Y_START = None
 
 glfwInit()
 glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
@@ -75,18 +125,27 @@ glfwSetCursorPosCallback(window, cursor_pos_callback)
 glfwSetMouseButtonCallback(window, mouse_callback)
 
 glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+glEnable(GL_BLEND)
+glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 glEnable(GL_DEPTH_TEST)
 glClearDepth(1)
 glClearColor(0, 0, 0, 1)
 
 quad_shader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/quad.vert", p.parent / "quad.frag", ["scale", "offset"])
+img_shader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/img.vert", p.parent / "img.frag", ["scale", "offset"])
 
 base_quad = BaseQuad()
 quad = QuadBuffer(base_quad, quad_shader)
+ui_quad = QuadBuffer(base_quad, quad_shader)
 
-quads.add(Quad(100, 300, 0, 100, 100, 0.5, 0.5, 0)) #  yellow
-quads.add(Quad(120, 320, 0, 100, 100, 0.5, 0.5, 1.0)) # blue
-quads.add(Quad(140, 340, 0, 100, 100, 0.5, 0, 0.5)) # magenta
+# move tool:
+move_button = Button(0, 0, 40, 40, Path(__file__).parent / "assets/images/move_tool.png")
+pan_button = Button(40, 0, 40, 40, Path(__file__).parent / "assets/images/pan_tool.png")
+zoom_button = Button(80, 0, 40, 40, Path(__file__).parent / "assets/images/zoom_tool.png")
+
+quads.add(Quad(quad, 100, 300, 0, 100 ,100, 0.5, 0.5, .0)) # yellow
+quads.add(Quad(quad, 120, 320, 0, 100, 100, 0.5, 0.5, 1.0)) # blue
+quads.add(Quad(quad, 490, 490, 0, 20, 20, 0.5, 0, 0.5)) # magenta
 
 while not glfwWindowShouldClose(window):
 
@@ -95,19 +154,31 @@ while not glfwWindowShouldClose(window):
         for q in quads: q.update()
         QUADS_UPDATED = False
 
+    if UI_QUADS_UPDATED:
+        ui_quad.clear()
+        if ui_selected is not None: ui_selected.quad.update()
+        UI_QUADS_UPDATED = False
+
     if RESIZED:
         glViewport(0, 0, WIDTH, HEIGHT)
         RESIZED = False
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     
-    scale, offset = (2 / WIDTH, -2 / HEIGHT), tuple(vec2(-1 + X * 2 / WIDTH, 1 + Y * -2 / HEIGHT).components())
+    scale, offset = (2 / WIDTH * SCALE, -2 * SCALE / HEIGHT), (-1 + X * 2 / (WIDTH), 1 + Y * -2 / (HEIGHT))
     quad.draw(scale, offset)
+    ui_scale, ui_offset = (2 / WIDTH, -2 / HEIGHT), (-1, 1)
+    ui_quad.draw(ui_scale, ui_offset)
+    for e in ui_elements: e.tex_quad.draw(ui_scale, ui_offset)
 
     glfwSwapBuffers(window)
     glfwPollEvents()
 
-base_quad.delete()
 quad_shader.delete()
+img_shader.delete()
+
+base_quad.delete()
 quad.delete()
+for e in ui_elements: e.tex_quad.delete()
+
 glfwTerminate()
