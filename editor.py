@@ -460,7 +460,8 @@ def _populate_render_data(node:Node, css_rules:dict, pstyle:dict=None) -> tuple[
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, img.width, img.height, 0, GL_RGB, GL_UNSIGNED_BYTE, img.data)
+                fmt = GL_RGBA if img.alpha else GL_RGB
+                glTexImage2D(GL_TEXTURE_2D, 0, fmt, img.width, img.height, 0, fmt, GL_UNSIGNED_BYTE, img.data)
                 glBindTexture(GL_TEXTURE_2D, 0)
                 img = SS.img_cache[path.as_posix()] = {"width": img.width, "height": img.height, "buffer": TexQuadBuffer(SS.base_quad, texture, img_shader)}
             else: img = SS.img_cache[path.as_posix()]

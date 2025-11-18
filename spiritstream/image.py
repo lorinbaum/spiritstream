@@ -10,6 +10,7 @@ class Image:
     height:int
     data:List
     color:bool
+    alpha:bool
 
 def read(path:Path) -> Image:
     match path.suffix:
@@ -94,7 +95,7 @@ def jpg_read(path):
         image_copy = (ctypes.c_ubyte * image_size)()
         ctypes.memmove(image_copy, image_ptr, image_size)
         njDone()
-        return Image("jpg", width, height, image_copy, is_color)
+        return Image("jpg", width, height, image_copy, is_color, False)
     
 def png_read(path):
     from spiritstream.bindings.spng import spng_ctx_new, spng_set_png_buffer, SpngErrno, spng_ctx_free, spng_ihdr, spng_get_ihdr, SpngColorType, SpngFormat, \
@@ -120,12 +121,11 @@ def png_read(path):
     height = ihdr.height
     color_type = ihdr.color_type
 
-    # Determine if color (treat indexed/truecolor/truecolor-alpha as color, grayscale as not)
-    is_color = color_type in (SpngColorType.TRUECOLOR, SpngColorType.TRUECOLOR_ALPHA, SpngColorType.INDEXED)
 
-    # Choose decode format: RGB8 for color (strips alpha if present), G8 for grayscale (strips alpha if present)
-    if is_color: fmt = SpngFormat.RGB8
-    else: fmt = SpngFormat.G8  # Use G8 even for grayscale-alpha to strip alpha and match nanojpeg's grayscale handling
+    is_color = color_type in (SpngColorType.TRUECOLOR, SpngColorType.TRUECOLOR_ALPHA, SpngColorType.INDEXED)
+    alpha = color_type is SpngColorType.TRUECOLOR_ALPHA # strip alpha on grayscale alpha images
+    # Not supporting grayscale color
+    fmt = SpngFormat.G8 if not is_color else SpngFormat.RGBA8 if alpha else SpngFormat.RGB
 
     image_size = ctypes.c_size_t()
     res = spng_decoded_image_size(ctx, fmt, ctypes.byref(image_size))
@@ -140,4 +140,4 @@ def png_read(path):
         raise RuntimeError("Failed to decode image")
 
     spng_ctx_free(ctx)
-    return Image("png", width, height, image_copy, is_color)
+    return Image("png", width, height, image_copy, is_color, alpha)
