@@ -1,6 +1,7 @@
 """
 - 3 squares that I can move around
-- toolbar with move, pan, zoom tools
+- toolbar with background and move, pan, zoom tools
+- use file argument and workspace to open file and drag open boxes and save their position and camera position
 """
 from spiritstream.bindings.opengl import *
 from spiritstream.bindings.glfw import *
@@ -9,20 +10,33 @@ from spiritstream.buffer import BaseQuad, QuadBuffer, TexQuadBuffer
 from spiritstream.tree import color_from_hex
 from spiritstream.vec import vec2
 import spiritstream.image as Image
+import json, argparse
+
+argparser = argparse.ArgumentParser(description="Spiritstream")
+argparser.add_argument("file", type=str, nargs="?", default=None, help="Path to file to open")
+args = argparser.parse_args()
+
+WORKSPACEPATH = p if (p:=Path(__file__).parent / "cache/workspace.json").exists() else None
+if args.file: data = {"last_open": Path(args.file)}
+else:
+    try:
+        with open(WORKSPACEPATH, "r") as f: data = json.load(f)
+    except: data = {}
+FILEPATH = Path(data.get("last_open", Path(__file__).parent/"Unnamed.canvas"))
+X, Y, SCALE = data.get("x", 0), data.get("y", 0), data.get("scale", 1)
+
 
 WIDTH = 1000
 HEIGHT = 1000
 RESIZED = True
-X = 0
-Y = 0
-SCALE = 1
+
 quads = set()
 DRAGGING = None
 DRAG_START = None
 X_START = Y_START = None
 SCALE_START = None
 QUADS_UPDATED = True
-UI_QUADS_UPDATED = True
+UI_SELECTION_QUADS_UPDATED = True
 
 SELECTION_COLOR = color_from_hex(0x423024)
 
@@ -56,13 +70,13 @@ class Button:
         self.tex_quad = TexQuadBuffer(base_quad, texture, img_shader)
         self.tex_quad.add([x+4, y+4, 0, w-8, h-8])
 
-        self.quad = Quad(ui_quad, x, y, 0.1, w, h, (c:=SELECTION_COLOR).r, c.g, c.b, c.a)
+        self.quad = Quad(ui_selected_quad, x, y, 0.1, w, h, (c:=SELECTION_COLOR).r, c.g, c.b, c.a)
         ui_elements.add(self)
     
     def select(self):
-        global ui_selected, UI_QUADS_UPDATED
+        global ui_selected, UI_SELECTION_QUADS_UPDATED
         ui_selected = self
-        UI_QUADS_UPDATED = True
+        UI_SELECTION_QUADS_UPDATED = True
 
 @GLFWframebuffersizefun
 def framebuffer_size_callback(window, width, height):
@@ -72,7 +86,12 @@ def framebuffer_size_callback(window, width, height):
 @GLFWkeyfun
 def key_callback(window, key:int, scancode:int, action:int, mods:int):
     if action in [GLFW_PRESS, GLFW_REPEAT]:
+        ctrl = bool(mods & GLFW_MOD_CONTROL)
         if key == GLFW_KEY_ESCAPE: glfwSetWindowShouldClose(window, GLFW_TRUE)
+        if key == GLFW_KEY_S and ctrl: # save
+            data = {"boxes": [{ "x": q.x, "y": q.y, "z": q.z, "w": q.w, "h": q.h, "r": q.r, "g": q.g, "b": q.b, "a": q.a } for q in quads]}
+            with open(FILEPATH, "w") as f: json.dump(data, f, indent=2)
+            glfwSetWindowTitle(window, (FILEPATH.name).encode())
 
 @GLFWcursorposfun
 def cursor_pos_callback(window, x, y):
@@ -95,6 +114,15 @@ def cursor_pos_callback(window, x, y):
             SCALE = SCALE_START * new_scale
             X = DRAG_START.x + new_scale * (X_START-DRAG_START.x)
             Y = DRAG_START.y + new_scale * (Y_START-DRAG_START.y)
+        elif ui_selected is box_button:
+            if DRAGGING is None:
+                new_quad = Quad(quad, (DRAG_START.x-X)/SCALE, (DRAG_START.y-Y)/SCALE, 0.5, 0, 0, 1.0, 0.2, 0.8) # new quad, always magentaish
+                quads.add(new_quad)
+                DRAGGING = new_quad
+            DRAGGING.w = abs(drag_offset.x / SCALE)
+            DRAGGING.h = abs(drag_offset.y / SCALE)
+            if x < DRAG_START.x: DRAGGING.x = (x-X) / SCALE
+            if y < DRAG_START.y: DRAGGING.y = (y-Y) / SCALE
 
 @GLFWmousebuttonfun
 def mouse_callback(window, button:int, action:int, mods:int):
@@ -131,33 +159,42 @@ glEnable(GL_DEPTH_TEST)
 glClearDepth(1)
 glClearColor(0, 0, 0, 1)
 
+glfwSetWindowTitle(window, (FILEPATH.name).encode())
+
 quad_shader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/quad.vert", p.parent / "quad.frag", ["scale", "offset"])
 img_shader = Shader(p:=Path(__file__).parent / "spiritstream/shaders/img.vert", p.parent / "img.frag", ["scale", "offset"])
 
 base_quad = BaseQuad()
 quad = QuadBuffer(base_quad, quad_shader)
-ui_quad = QuadBuffer(base_quad, quad_shader)
+ui_quad = QuadBuffer(base_quad, quad_shader) # for static ui
+ui_selected_quad = QuadBuffer(base_quad, quad_shader) # for selection
 
-# move tool:
+# button background:
+Quad(ui_quad, 0, 0, 0.2, 160, 40, 0.1, 0.1, 0.1)
+
 move_button = Button(0, 0, 40, 40, Path(__file__).parent / "assets/images/move_tool.png")
 pan_button = Button(40, 0, 40, 40, Path(__file__).parent / "assets/images/pan_tool.png")
 zoom_button = Button(80, 0, 40, 40, Path(__file__).parent / "assets/images/zoom_tool.png")
+box_button = Button(120, 0, 40, 40, Path(__file__).parent / "assets/images/box_tool.png")
 
-quads.add(Quad(quad, 100, 300, 0, 100 ,100, 0.5, 0.5, .0)) # yellow
-quads.add(Quad(quad, 120, 320, 0, 100, 100, 0.5, 0.5, 1.0)) # blue
-quads.add(Quad(quad, 490, 490, 0, 20, 20, 0.5, 0, 0.5)) # magenta
+if FILEPATH.exists():
+    with open(FILEPATH, "r") as f: data = json.load(f)
+    for box in data["boxes"]: quads.add(Quad(quad, box["x"], box["y"], box["z"], box["w"], box["h"], box["r"], box["g"], box["b"], box["a"]))
 
+first_setup = True
 while not glfwWindowShouldClose(window):
 
     if QUADS_UPDATED:
         quad.clear()
         for q in quads: q.update()
         QUADS_UPDATED = False
+        if first_setup: first_setup = False
+        else: glfwSetWindowTitle(window, (FILEPATH.name + "*").encode())
 
-    if UI_QUADS_UPDATED:
-        ui_quad.clear()
+    if UI_SELECTION_QUADS_UPDATED:
+        ui_selected_quad.clear()
         if ui_selected is not None: ui_selected.quad.update()
-        UI_QUADS_UPDATED = False
+        UI_SELECTION_QUADS_UPDATED = False
 
     if RESIZED:
         glViewport(0, 0, WIDTH, HEIGHT)
@@ -169,6 +206,7 @@ while not glfwWindowShouldClose(window):
     quad.draw(scale, offset)
     ui_scale, ui_offset = (2 / WIDTH, -2 / HEIGHT), (-1, 1)
     ui_quad.draw(ui_scale, ui_offset)
+    ui_selected_quad.draw(ui_scale, ui_offset)
     for e in ui_elements: e.tex_quad.draw(ui_scale, ui_offset)
 
     glfwSwapBuffers(window)
@@ -180,5 +218,8 @@ img_shader.delete()
 base_quad.delete()
 quad.delete()
 for e in ui_elements: e.tex_quad.delete()
+
+if WORKSPACEPATH is not None:
+    with open(WORKSPACEPATH, "w") as f: json.dump({"last_open": FILEPATH.as_posix(), "x":X, "y":Y, "scale":SCALE}, f, indent=2)
 
 glfwTerminate()
