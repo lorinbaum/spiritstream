@@ -347,7 +347,9 @@ GLFW_PRESS = 1
 GLFW_REPEAT = 2
 
 class _GLFWwindow(ctypes.Structure): pass
+class _GLFWcursor(ctypes.Structure): pass
 GLFWwindow = ctypes.POINTER(_GLFWwindow)
+GLFWcursor = ctypes.POINTER(_GLFWcursor)
 GLFWmonitor = ctypes.c_void_p
 
 GLFWcharfun = ctypes.CFUNCTYPE(None, GLFWwindow, ctypes.c_uint)
@@ -376,6 +378,8 @@ glfwSetMouseButtonCallback = glfwfunc("glfwSetMouseButtonCallback", GLFWmousebut
 glfwSetCursorPosCallback = glfwfunc("glfwSetCursorPosCallback", GLFWcursorposfun, [GLFWwindow, GLFWcursorposfun])
 glfwSetScrollCallback = glfwfunc("glfwSetScrollCallback", GLFWscrollfun, [GLFWwindow, GLFWscrollfun])
 glfwGetCursorPos = glfwfunc("glfwGetCursorPos", None, [GLFWwindow, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)])
+glfwSetCursor = glfwfunc("glfwSetCursor", None, [GLFWwindow, GLFWcursor])
+glfwCreateStandardCursor = glfwfunc("glfwCreateStandardCursor", GLFWcursor, [ctypes.c_int])
 
 glfwGetMouseButton = glfwfunc("glfwGetMouseButton", ctypes.c_int, [GLFWwindow, ctypes.c_int])
 glfwSetClipboardString = glfwfunc("glfwSetClipboardString", None, [GLFWwindow, ctypes.c_char_p])
