@@ -13,6 +13,10 @@ from spiritstream.tree import parse, parseCSS, Node, K, Color, Selector, color_f
 from spiritstream.buffer import BaseQuad, QuadBuffer, TexQuadBuffer
 import spiritstream.image as Image
 
+# BUG: cutting content puts cursor in wrong positon
+# TODO: flickering up and down when selection hits images from below
+# TODO: it's exporting fonts even when they not used.
+
 argparser = argparse.ArgumentParser(description="Spiritstream")
 argparser.add_argument("file", type=str, nargs="?", default=None, help="Path to file to open")
 args = argparser.parse_args()
@@ -169,7 +173,7 @@ class Cursor:
                 x = l.xs[offset-total]
                 break
             total += len(l.xs)-1
-        if x is None and post_wrap and total == offset: x = l.xs[total] # if post_wrap prevents finding x, try without
+        if x is None and post_wrap and total == offset: x = l.xs[-1] # if post_wrap prevents finding x but no post_wrap would be valid, use last x
         if l is None or x is None:
             show(self.frame)
             raise RuntimeError((node, l, x, total, offset, post_wrap))
@@ -803,7 +807,8 @@ while not glfwWindowShouldClose(window):
                 if frame.cursor.selection:
                     glfwSetClipboardString(window, _get_selection_text(frame, frame.cursor.selection).encode())
                     _del_selection_text(frame, frame.cursor.selection)
-                reparse = True
+                    frame.cursor.update_location((s:=frame.cursor.selection.start).node, s.offset, False, s.post_wrap)
+                    reparse = True
             elif name == "paste":
                 if frame.cursor.selection:
                     _del_selection_text(frame, frame.cursor.selection)

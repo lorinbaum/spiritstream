@@ -488,7 +488,7 @@ def htmltag(node:Node, open=True, basepath:Path=None) -> str:
                 if href.suffix == ".md": href = href.parent.joinpath(f"{href.stem}.html")
                 href = os.path.relpath(href.as_posix(), basepath.parent.as_posix()) + (f"#{sluggify(heading)}" if heading else "")
             ret += f"<a href=\"{href}\"" if open else "</a>"
-        case K.IMG: ret += f"<img src=\"{basepath.parent.joinpath(node.href).resolve()}\" />" if open else ""
+        case K.IMG: ret += f"<img src=\"{os.path.relpath(basepath.parent.joinpath(node.href).as_posix(), basepath.parent.as_posix())}\" />" if open else ""
         case K.HR: ret += "<hr>" if open else ""
         case _: ret += f"<{''if open else '/'}{node.k.name.lower()}{'' if open else '>'}"
     return ret if ret.endswith(">") or not open or ret == "" else ret + f"""{' class="' + ' '.join(node.cls) + '"' if node.cls else ''}\
