@@ -316,70 +316,65 @@ def typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:fl
 
 # TODO: select font more carefully. may contain symbols not in font
 # something like g = next((fonŧ[g] for font in fonts if g in font))
-# TODO: line_strings is creating ambiguity, sucks, remove. index into text using line start and end to actually get the text. obviously.
-@functools.lru_cache(maxsize=1024) # TODO custom cache so it can also shift cached lines down
-def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left") -> tuple[Node, list[float]]:
+@functools.lru_cache(maxsize=256)
+def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left") -> tuple[list[Node], list[float]]:
     """
     Returns
-    - Node with LINE children to add to the node tree
-    - Tex quad instance data for all glyphs
-    - list of indices where text wraps
+    - list of Nodes with type=K.LINE and "xs" - a list of x positions between characteres. number of characters in a line is always len(line.xs)-1
+    - instance data as a list of floats repeating the format (x, y, z, width, height, texture x, texture y, red, green, blue, alpha) for each glyph
     """
+    lines, instance_data = [], []
     font, fontweight = get_font(fontfamily, fontweight) # replace fontweight value with actual used based on what's available
-    cx = x # character x offset
-    linepos = vec2(x, y) # top left corner of line hitbox
+    
+    # SPLIT INTO LINES
+    cx, linex, liney = x, x, y
     if newline_x is None: newline_x = x
-    assert cx <= newline_x + width, (cx, newline_x, width)
-    lines, line_strings = [], [""]
+    assert x <= newline_x + width, (x, newline_x, width)
     xs = [cx] # cursor x positions
     for i, c in enumerate(text):
         if c == "\n":
-            lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, xs=xs+[cx]))
-            cx, linepos, xs = newline_x, vec2(newline_x, linepos.y + lineheight), [] if i == len(text)-1 else [newline_x]
-            line_strings.append("")
+            lines.append(Node(K.LINE, None, x=linex, y=liney, w=cx - linex, h=lineheight, xs=xs+[cx]))
+            cx, linex, liney, xs = newline_x, newline_x, liney + lineheight, [] if i == len(text)-1 else [newline_x]
             continue
         g = font.glyph(c, fontsize, 72) # NOTE: dpi is 72 so the font renderer does no further scaling. It uses 72 dpi baseline.
         if cx + g.advance > newline_x + width:
-            wrap_idx = fwrap + 1 if (fwrap:=line_strings[-1].rfind(" ")) >= 0 else len(line_strings[-1])
-            if wrap_idx == len(line_strings[-1]): # no wrapping necessary, just cut off
-                lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, xs=xs))
-                cx, linepos = newline_x, vec2(newline_x, linepos.y + lineheight)
-                xs = [cx]
-                line_strings.append("")
-            else:
-                line_strings.append(line_strings[-1][wrap_idx:])
-                line_strings[-2] = line_strings[-2][:wrap_idx]
-                lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=xs[wrap_idx] - linepos.x, h=lineheight, xs=xs[:wrap_idx+1]))
+            if (wrap_idx:=text[i-len(xs)+1:i].rfind(" ")+1) >= 1:
+                lines.append(Node(K.LINE, None, x=linex, y=liney, w=xs[wrap_idx] - linex, h=lineheight, xs=xs[:wrap_idx+1]))
                 xs = [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]]
-                cx, linepos = xs[-1], vec2(newline_x, linepos.y + lineheight)
-
-        line_strings[-1] += c
+                cx, linex, liney = xs[-1], newline_x, liney + lineheight
+            else:
+                lines.append(Node(K.LINE, None, x=linex, y=liney, w=cx - linex, h=lineheight, xs=xs))
+                cx, linex, liney = newline_x, newline_x, liney + lineheight
+                xs = [cx]
         cx += g.advance
         xs.append(cx)
+    if xs: lines.append(Node(K.LINE, None, x=linex, y=liney, w=cx - linex, h=lineheight, xs=xs))
 
-    if xs: lines.append(Node(K.LINE, None, x=linepos.x, y=linepos.y, w=cx - linepos.x, h=lineheight, xs=xs))
-    if align in ["center", "right"]:
-        for c in lines:
-            shift = x+width-c.w-c.x / (2 if align == "center" else 1)
-            c.x, c.xs = c.x + shift, [x0 + shift for x0 in c.xs]
+    # ALIGN LINES
+    if align in ("center", "right"):
+        for i, l in enumerate(lines):
+            shift = newline_x+width-(x-newline_x if i == 0 else 0)-l.w-l.x / (2 if align == "center" else 1)
+            l.x, l.xs = l.x + shift, [x0 + shift for x0 in l.xs]
 
-    instance_data = []
+    # GENERATE INSTANCE DATA
+    assert len(text) == sum((len(l.xs)-1 for l in lines))
     ascentpx = font.engine.hhea.ascent * fontsize / font.engine.head.unitsPerEM
     descentpx = font.engine.hhea.descent * fontsize / font.engine.head.unitsPerEM
     total = ascentpx - descentpx
-    for s, l in zip(line_strings, lines):
-        for i, c in enumerate(s):
-            g = font.glyph(c, fontsize, 72)
-            if c != " ":
-                # TODO: font could be named the same in css but refer to a different file. use font name from file here, not css font family
-                key = f"{ord(c)}_{fontfamily}_{fontsize}_{fontweight}"
+    acc = 0
+    for l in lines:
+        for i, c in enumerate(text[acc:(acc:=acc+len(l.xs)-1)]):
+            if c not in "\n ":
+                g = font.glyph(c, fontsize, 72)
+                key = f"{ord(c)}_{font.info.get("Unique font identifier")}_{fontsize}_{fontweight}"
                 instance_data += [l.xs[i] + g.bearing.x, l.y + ascentpx + (lineheight - total)/2 + (g.size.y - g.bearing.y), 0.5, # pos
                     g.size.x, -g.size.y, # size
-                    *(SS.glyphAtlas.coordinates[key] if key in SS.glyphAtlas.coordinates else SS.glyphAtlas.add(key, font.render(c, fontsize, 72))), # uv offset and size
+                    *(d if (d:=SS.glyphAtlas.coordinates.get(key, None)) is not None else SS.glyphAtlas.add(key, font.render(c, fontsize, 72))), # uv offset and size
                     color.r, color.g, color.b, color.a] # color
+
     return lines, instance_data
 
-class Edit(Enum): GLOBAL, LOCAL = auto(), auto() # GLOBAL affects gaps in all descendants, LOCAL affects only gaps in direct children, 
+class Edit(Enum): GLOBAL, LOCAL = auto(), auto() # GLOBAL affects all descendants, LOCAL affects only direct children, 
 
 def populate_render_data(node:Node, css_rules:dict, pstyle:dict=None):
     SS.quad_buffer_bg.clear()

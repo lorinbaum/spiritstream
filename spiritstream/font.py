@@ -8,12 +8,33 @@ from pathlib import Path
 import math, functools
 
 """
+- high level font interface to get glyph objects (size, bearing, advance) or bitmaps
 - Parser / Serializer for dtypes and TrueType tables
 - TrueType table classes for parsing
 - TrueType engine to load fonts, tables and glyphs and canonicalize the contours to be rasterized by the
 - general Curve rasterizer (supports Super-Sampled Anti-Aliasing)
-- higher level font interface to get glyph objects (size, bearing, advance) or bitmaps
 """
+
+# ABSTRACT FONT INTERFACE
+
+class Font:
+    def __init__(self, path:Union[str, Path], **kwargs):
+        assert (path := Path(path)).suffix == ".ttf", f"Can't load {path}. Only True Type fonts (.tff) are supported."
+        self.engine = TTF(path, **kwargs)
+        
+    @property
+    def info(self): return {k:v for k,v in self.engine.name.__dict__.items() if k in self.engine.name.id_meaning}
+
+    def glyph(self, char:str, fontsize, dpi:int) -> "Glyph":
+        assert len(char) == 1, f"Can't render '{char}', can only get one character at a time."
+        assert fontsize > 0 and dpi > 0, f"Can't render with {fontsize=} at {dpi=}. Both values must be positive."
+        return self.engine.glyph(ord(char), fontsize, dpi)
+
+    def render(self, char:str, fontsize, dpi:int, antialiasing:int=5) -> List[List[int]]:
+        assert len(char) == 1, f"Can't render '{char}', can only render one character at a time."
+        assert fontsize > 0 and dpi > 0, f"Can't render with {fontsize=} at {dpi=}. Both values must be positive."
+        assert antialiasing >= 1, f"Can't render with antialiasing of {antialiasing}. Must be >=1. If 1, applies no Anti-Aliasing"
+        return self.engine.render(fontsize, dpi, unicode=ord(char), antialiasing=antialiasing)
 
 # PARSER / SERIALIZER FOR DTYPES AND TABLES
 
@@ -338,6 +359,35 @@ class post_table(table):
         self.underlineThickness = b.parse(FWord)
         # there is more here, but thats not needed
 
+class name_table(table):
+    def _from_bytes(self, b:Parser):
+        self.id_meaning = ("Copyright notice", "Font Family name", "Font Subfamily name", "Unique font identifier", "Full font name", "Version string", 
+                      "PostScript font name", "Trademark", "Manufacturer Name", "Designer", "Description", "Vendor URL", "Designer URL",
+                      "License Desciption", "Licence Info URL", None, "Typographic Family name", "Typographic Subfamily name",
+                      "Compatible full font name", "Sample text", "PostScript CID findfont name", "WWS Family Name", "WWS Subfamily Name",
+                      "Light Background Palette", "Dark Background Palette", "Variations PostScript Name Prefix")
+        offset = b.p
+        self.format = b.parse(uint16)
+        assert self.format == 0
+        self.count = b.parse(uint16)
+        self.stringOffset = b.parse(uint16)
+        self.nameRecord = b.parse(NameRecord, count=self.count)
+        offset = offset + self.stringOffset
+        for n in self.nameRecord:
+            if n.languageID == 0x409 and 15 != n.nameID <= 26: # en-US
+                buffer = b.b[offset+n.offset:offset+n.offset+n.length]
+                value = buffer.replace(b"\x00", b"").decode(errors="replace")
+                setattr(self, self.id_meaning[n.nameID], value)
+
+class NameRecord(table):
+    def _from_bytes(self, b:Parser):
+        self.platformID = b.parse(uint16)
+        self.platformSpecificID = b.parse(uint16)
+        self.languageID = b.parse(uint16)
+        self.nameID = b.parse(uint16)
+        self.length = b.parse(uint16)
+        self.offset = b.parse(uint16)
+
 # TRUE TYPE ENGINE
 
 # NOTE: can't be frozen because is assigned texture coordinates in the glyph atlas
@@ -395,6 +445,7 @@ class TTF:
         self.hmtx = p.parse(hmtx_table, offset=self.table_directory["hmtx"].offset, numOfLongHorMetrics=self.hhea.numOfLongHorMetrics, numGlyphs=self.maxp.numGlyphs)
         self.post = p.parse(post_table, offset=self.table_directory["post"].offset)
         self.glyf = p.b[(t:=self.table_directory["glyf"]).offset:t.offset+t.length] # raw bytes of glyf table
+        self.name = p.parse(name_table, offset=self.table_directory["name"].offset)
         del p
 
         if check: return results
@@ -469,7 +520,6 @@ class TTF:
             else:
                 glyph.advanceWidth = self.fupx(self.hmtx.longHorMetric[-1].advanceWidth, fontsize, dpi)
                 glyph.leftSideBearing = self.fupx(self.hmtx.leftSideBearing[glyphIndex - self.hhea.numOfLongHorMetrics], fontsize, dpi)
-        
         if _is_child == False and self.head.flags & 2: glyph.x = [x - glyph.leftSideBearing for x in glyph.x] # this flag means left side bearing should be aligned with x = 0. only applies when not dealing with compound glyph components
         return glyph
 
@@ -552,22 +602,3 @@ def rasterize(contours: List[List[CurvePoint]], aa: int) -> Tuple[List[List[int]
                     v += 1 if sum(i.wn for i in ints if i.x>x+1e-6) != 0 else 0
             bmp[row][col] = int(v/(aa**2)*255)
     return bmp
-
-# ABSTRACT FONT INTERFACE
-
-class Font:
-    def __init__(self, path:Union[str, Path], **kwargs):
-        assert (path := Path(path)).suffix == ".ttf", f"Can't load {path}. Only True Type fonts (.tff) are supported."
-        self.engine = TTF(path, **kwargs)
-
-    def glyph(self, char:str, fontsize, dpi:int) -> Glyph:
-        assert len(char) == 1, f"Can't render '{char}', can only get one character at a time."
-        assert fontsize > 0 and dpi > 0, f"Can't render with {fontsize=} at {dpi=}. Both values must be positive."
-        return self.engine.glyph(ord(char), fontsize, dpi)
-
-    def render(self, char:str, fontsize, dpi:int, antialiasing:int=5) -> List[List[int]]:
-        assert len(char) == 1, f"Can't render '{char}', can only render one character at a time."
-        assert fontsize > 0 and dpi > 0, f"Can't render with {fontsize=} at {dpi=}. Both values must be positive."
-        assert antialiasing >= 1, f"Can't render with antialiasing of {antialiasing}. Must be >=1. If 1, applies no Anti-Aliasing"
-        return self.engine.render(fontsize, dpi, unicode=ord(char), antialiasing=antialiasing)
-    
