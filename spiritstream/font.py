@@ -29,12 +29,18 @@ class Font:
         assert len(char) == 1, f"Can't render '{char}', can only get one character at a time."
         assert fontsize > 0 and dpi > 0, f"Can't render with {fontsize=} at {dpi=}. Both values must be positive."
         return self.engine.glyph(ord(char), fontsize, dpi)
+    
+    @functools.cache
+    def glyphMetrics(self, char:str, fontsize, dpi:int) -> tuple[float, float, float]:
+        assert len(char) == 1, f"Can't render '{char}', can only get one character at a time."
+        assert fontsize > 0 and dpi > 0, f"Can't render with {fontsize=} at {dpi=}. Both values must be positive."
+        return self.engine.glyphMetrics(ord(char), fontsize, dpi)
 
-    def render(self, char:str, fontsize, dpi:int, antialiasing:int=5) -> List[List[int]]:
+    def render(self, char:str, fontsize, dpi:int, antialiasing:int=5, subpx_offset:float=0) -> List[List[int]]:
         assert len(char) == 1, f"Can't render '{char}', can only render one character at a time."
         assert fontsize > 0 and dpi > 0, f"Can't render with {fontsize=} at {dpi=}. Both values must be positive."
         assert antialiasing >= 1, f"Can't render with antialiasing of {antialiasing}. Must be >=1. If 1, applies no Anti-Aliasing"
-        return self.engine.render(fontsize, dpi, unicode=ord(char), antialiasing=antialiasing)
+        return self.engine.render(fontsize, dpi, unicode=ord(char), antialiasing=antialiasing, subpx_offset=subpx_offset)
 
 # PARSER / SERIALIZER FOR DTYPES AND TABLES
 
@@ -465,10 +471,26 @@ class TTF:
             bearing = g.leftSideBearing
         return Glyph(size, bearing, g.advanceWidth)
 
-    def render(self, fontsize, dpi, unicode:int=None, glyphIndex=None, antialiasing=1):
+    def render(self, fontsize, dpi, unicode:int=None, glyphIndex=None, antialiasing=1, subpx_offset=0):
         assert (unicode is not None and isinstance(unicode, int)) or (glyphIndex is not None and isinstance(glyphIndex, int))
         glyphIndex = glyphIndex if glyphIndex is not None else self.cmap.subtable.getGlyphIndex(unicode)
-        return rasterize(self._canonicalize_contours(self.loadglyph(glyphIndex, fontsize, dpi)), aa=antialiasing)
+        return rasterize(self._canonicalize_contours(self.loadglyph(glyphIndex, fontsize, dpi), subpx_offset=subpx_offset), aa=antialiasing)
+
+    def _glyphMetrics(self, p:Parser, glyphIndex) -> tuple[float, float]:
+        p.p = self.loca[glyphIndex]
+        numberOfContours = p.parse(int16)
+        p.p+=6 # skip xMin, yMin, xMax
+        bearing_y = p.parse(int16) # yMax
+        if numberOfContours < 0: # Compound glyph, metrics may be taken from one of the components
+            while True:
+                if (component:=p.parse(glyphComponent)).USE_MY_METRICS: return self._glyphMetrics(p, component.glyphIndex)
+                if not component.MORE_COMPONENTS: break
+        if glyphIndex < self.hhea.numOfLongHorMetrics: ret = (m:=self.hmtx.longHorMetric[glyphIndex]).advanceWidth, m.leftSideBearing
+        else: ret = self.hmtx.longHorMetric[-1].advanceWidth, self.hmtx.leftSideBearing[glyphIndex - self.hhea.numOfLongHorMetrics]
+        return ret + (bearing_y,)
+
+    def glyphMetrics(self, unicode, fontsize, dpi) -> tuple[float, float]:
+        return tuple(map(lambda x: self.fupx(x, fontsize, dpi), self._glyphMetrics(Parser(self.glyf), self.cmap.subtable.getGlyphIndex(unicode))))
 
     # used for compound glyphs
     @staticmethod
@@ -523,7 +545,7 @@ class TTF:
         if _is_child == False and self.head.flags & 2: glyph.x = [x - glyph.leftSideBearing for x in glyph.x] # this flag means left side bearing should be aligned with x = 0. only applies when not dealing with compound glyph components
         return glyph
 
-    def _canonicalize_contours(self, g:glyf) -> List[List[CurvePoint]]:
+    def _canonicalize_contours(self, g:glyf, subpx_offset=0) -> List[List[CurvePoint]]:
         """
         Returns a 2D list of rendered pixels (Row-major).
         Uses the non-zero winding number rule: for each pixel, go right and on each intersection with any contour segment,
@@ -533,10 +555,9 @@ class TTF:
         """
         assert len(g.x) == len(g.y)
         if len(g.x) == 0: return []
-        minX = math.floor(min(g.x))
-        minY, maxY = math.floor(min(g.y)), math.ceil(max(g.y))
-        g.bearing = vec2(g.leftSideBearing - (min(g.x) - minX), maxY)
-        pts = [CurvePoint(x-minX, y-minY, bool(f & 0x01)) for x,y,f in zip(g.x, g.y, g.flags)] # shift into positive range
+        mingx, maxgy = min(g.x), math.ceil(max(g.y))
+        # shift into positive range and flip vertically to transform from origin at center and y up to origin in top left and y down
+        pts = [CurvePoint(x-mingx+subpx_offset, maxgy-y, bool(f & 0x01)) for x,y,f in zip(g.x, g.y, g.flags)]
         # add oncurve points between consecutive control points
         all_contours = [] # first point will exist twice. at 0 and -1
         start = 0

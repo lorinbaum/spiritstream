@@ -16,12 +16,12 @@ def read(path:Path) -> Image:
     match path.suffix:
         case ".jpg": return jpg_read(path)
         case ".png": return png_read(path)
-        case _: raise NotImplementedError(f"Writing {path.suffix} format not supported")
+        case _: raise NotImplementedError(f"Reading {path.suffix} format not supported")
 
 def write(data, path:Path):
     match path.suffix:
         case ".bmp": bmp_write(data, path)
-        case _: raise NotImplementedError(f"Reading {path.suffix} format not supported")
+        case _: raise NotImplementedError(f"Writing {path.suffix} format not supported")
         
 
 def bmp_write(data, path):

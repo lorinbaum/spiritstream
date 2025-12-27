@@ -309,20 +309,34 @@ def _del_selection_text(frame:Node, sel:Selection):
         while (nxt:=next(gen, None)) and nxt is not sel.end.node: nxt.text = ""
         sel.end.node.text = sel.end.node.text[sel.end.offset:]
 
-def typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left") -> tuple[Node, list[float]]:
-    lines, idata = _typeset(text, x, y, width, fontfamily, fontsize, fontweight, color, lineheight, newline_x, align)
+def typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float,\
+            newline_x:float=None, align="left") -> tuple[Node, list[float]]:
+    """Wrapper around _typeset so _typeset can use cache"""
+    idata, lines = _typeset(text, x, y, width, fontfamily, fontsize, fontweight, color, lineheight, newline_x, align)
     SS.glyph_buffer.add(idata)
     return lines
 
 # TODO: select font more carefully. may contain symbols not in font
 # something like g = next((fonŧ[g] for font in fonts if g in font))
 @functools.lru_cache(maxsize=256)
-def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float, newline_x:float=None, align="left") -> tuple[list[Node], list[float]]:
+def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:float, fontweight:int, color:Color, lineheight:float,\
+             newline_x:float=None, align="left") -> tuple[list[float], list[Node]]:
     """
-    Returns
-    - list of Nodes with type=K.LINE and "xs" - a list of x positions between characteres. number of characters in a line is always len(line.xs)-1
-    - instance data as a list of floats repeating the format (x, y, z, width, height, texture x, texture y, red, green, blue, alpha) for each glyph
+    Converts input into:
+    - list of floats intended for instanced OpenGL buffer. It repeats the following pattern of 13 values for each non-whitespace character:
+      pixel coordinates x, y and z; glyph pixel width and height; normalized glyph texture x, y, width and height; color red, green, blue and alpha
+      pixel coordinate origin is the top left window corner, x increases towards right, y towards bottom.
+      glyph texture coordinates origin in top point to the top left corner of the texture
+    - list of Nodes of type K.LINE, holding the x, y, width and height values and all cursor x coordinates (between characters) for that line.
+      number of characters per line always equals len(line.xs) - 1
+    
+    Arguments:
+    - x: x coordinate of first line, all additional lines use newline_x
+    - y: y coordinate of the top edge of the first line
+    - width: lines wrap before exceeding this width
     """
+    antialiasing = 5
+    subpixel_res = 4
     lines, instance_data = [], []
     font, fontweight = get_font(fontfamily, fontweight) # replace fontweight value with actual used based on what's available
     
@@ -336,8 +350,8 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
             lines.append(Node(K.LINE, None, x=linex, y=liney, w=cx - linex, h=lineheight, xs=xs+[cx]))
             cx, linex, liney, xs = newline_x, newline_x, liney + lineheight, [] if i == len(text)-1 else [newline_x]
             continue
-        g = font.glyph(c, fontsize, 72) # NOTE: dpi is 72 so the font renderer does no further scaling. It uses 72 dpi baseline.
-        if cx + g.advance > newline_x + width:
+        advance, _, _ = font.glyphMetrics(c, fontsize, 72)
+        if cx + advance > newline_x + width:
             if (wrap_idx:=text[i-len(xs)+1:i].rfind(" ")+1) >= 1:
                 lines.append(Node(K.LINE, None, x=linex, y=liney, w=xs[wrap_idx] - linex, h=lineheight, xs=xs[:wrap_idx+1]))
                 xs = [newline_x + x0 - xs[wrap_idx] for x0 in xs[wrap_idx:]]
@@ -346,7 +360,7 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
                 lines.append(Node(K.LINE, None, x=linex, y=liney, w=cx - linex, h=lineheight, xs=xs))
                 cx, linex, liney = newline_x, newline_x, liney + lineheight
                 xs = [cx]
-        cx += g.advance
+        cx += advance
         xs.append(cx)
     if xs: lines.append(Node(K.LINE, None, x=linex, y=liney, w=cx - linex, h=lineheight, xs=xs))
 
@@ -365,14 +379,17 @@ def _typeset(text:str, x:float, y:float, width:float, fontfamily:str, fontsize:f
     for l in lines:
         for i, c in enumerate(text[acc:(acc:=acc+len(l.xs)-1)]):
             if c not in "\n ":
-                g = font.glyph(c, fontsize, 72)
-                key = f"{ord(c)}_{font.info.get("Unique font identifier")}_{fontsize}_{fontweight}"
-                instance_data += [l.xs[i] + g.bearing.x, l.y + ascentpx + (lineheight - total)/2 + (g.size.y - g.bearing.y), 0.5, # pos
-                    g.size.x, -g.size.y, # size
-                    *(d if (d:=SS.glyphAtlas.coordinates.get(key, None)) is not None else SS.glyphAtlas.add(key, font.render(c, fontsize, 72))), # uv offset and size
-                    color.r, color.g, color.b, color.a] # color
-
-    return lines, instance_data
+                _, bearing_x, bearing_y = font.glyphMetrics(c, fontsize, 72)
+                newX = round((l.xs[i]+bearing_x)*subpixel_res)/subpixel_res
+                protokey = f"{c}_{font.info["Unique font identifier"]}_{fontsize}_{72}_"
+                if (m:=SS.glyphAtlas.metrics.get(protokey+str(newXsubpx:=round(newX%1, 3)), None)) is None:
+                    for subpx in range(subpixel_res):
+                        subpx = round(subpx/subpixel_res, 3)
+                        m_0 = SS.glyphAtlas.add(protokey+str(subpx), font.render(c, fontsize, 72, antialiasing, subpx))
+                        if subpx == newXsubpx: m = m_0
+                instance_data.extend([int(newX), int(l.y+ascentpx+(lineheight-total)/2-math.ceil(bearing_y)), 0.5, m.w, m.h, m.tx, m.ty, m.tw, m.th,
+                                      color.r, color.g, color.b, color.a])
+    return instance_data, lines
 
 class Edit(Enum): GLOBAL, LOCAL = auto(), auto() # GLOBAL affects all descendants, LOCAL affects only direct children, 
 
@@ -533,7 +550,7 @@ def _populate_render_data(node:Node, css_rules:dict, pstyle:dict=None) -> tuple[
             style["_block"] = pstyle["_block"]
         return style["_block"], style["_inline"], style["_margin"]
     
-def get_font(fontfamily:str, fontweight:int) -> Font:
+def get_font(fontfamily:str, fontweight:int) -> tuple[Font, int]:
     ret, d, w = None, math.inf, None
     for font in SS.fonts:
         if font["font-family"] == fontfamily and (d0:=abs((w0:=font.get("font-weight", 400))-fontweight)) < d: ret, d, w = font["Font"], d0, w0
@@ -661,7 +678,7 @@ if CACHE_GLYPHATLAS:
         SS.glyphAtlas._texture_setup()
     else: print(f"No cached glyphatlas found at {atlaspath}.")
 # GL_RED because single channel, assign after window creation + assignment else texture settings won't apply
-if not getattr(SS, "glyphAtlas", None): SS.glyphAtlas = TextureAtlas(GL_RED)
+if not getattr(SS, "glyphAtlas", None): SS.glyphAtlas = TextureAtlas(GL_RED, size=512)
 
 glfwSetFramebufferSizeCallback(window, framebuffer_size_callback)
 glfwSetCharCallback(window, char_callback)
@@ -930,7 +947,7 @@ while not glfwWindowShouldClose(window):
 
 with open(WORKSPACEPATH, "w") as f: json.dump({"textpath": TEXTPATH.as_posix(), "sceney": SCENEY, "cursoridx": CURSORIDX, "cursor_post_wrap": CURSOR_POST_WRAP}, f)
 
-if SAVE_GLYPHATLAS: Image.write(list(reversed(SS.glyphAtlas.bitmap)), Path(__file__).parent / "GlyphAtlas.bmp")
+if SAVE_GLYPHATLAS: Image.write(SS.glyphAtlas.bitmap, Path(__file__).parent / "GlyphAtlas.bmp")
 
 if CACHE_GLYPHATLAS:
     with open(atlaspath, "wb") as f: pickle.dump(SS.glyphAtlas, f)

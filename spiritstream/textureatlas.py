@@ -1,5 +1,6 @@
 from spiritstream.bindings.opengl import *
 from typing import List, Dict, Tuple
+from dataclasses import dataclass
 
 # from https://github.com/tinygrad/tinygrad/blob/master/tinygrad/helpers.py
 def fully_flatten(l):
@@ -11,17 +12,29 @@ def fully_flatten(l):
 
 formats = {
    GL_RED: 1,
-#    GL_RGB: 3 # TODO: add support
+#    GL_RGB: 3 # TODO: add support for multiple channels
 }
+
+@dataclass(frozen=True)
+class BitmapMetrics:
+    w:int
+    h:int
+    # normalized texture coordinates / size
+    tx:float
+    ty:float
+    tw:float
+    th:float
+
 class TextureAtlas:
     def __init__(self, fmt:int, textures:Dict[str, List[float]]=None, size:int=256):
+        self.antialiasing = 5
+        self.subpixel_res = 4
         assert fmt in formats.keys()
         self.fmt = fmt
-        self.coordinates:Dict[str, Tuple[float]] = dict()
+        self.metrics:Dict[str, Tuple[float]] = dict()
         self.channels = formats[fmt]
         self.size = size
         self.bitmap = [[0 for row in range(size)] for column in range(size)]
-        # self.bitmap = [[[0 for c in range(self.channels)] for row in range(size)] for column in range(size)]
         self.skyline:List[Tuple] = [(0, 0)]
         self._texture_setup()
         if textures is not None:
@@ -40,7 +53,7 @@ class TextureAtlas:
         glTexImage2D(GL_TEXTURE_2D, 0, self.fmt, self.size, self.size, 0, self.fmt, GL_UNSIGNED_BYTE, (ctypes.c_ubyte * len(flatex))(*flatex))
         glBindTexture(GL_TEXTURE_2D, 0)
 
-    def add(self, id:str, bitmap:List[float]):
+    def add(self, key:str, bitmap:List[float]) -> BitmapMetrics:
         """ Uses the Skyline algorithm for 2D packing of textures:
         Finds the lowest leftmost position to fit a rectangle of size (w, h).
         self.skyline a list of (x, y) pairs, marking the start of each "step" in the skyline profile.
@@ -69,7 +82,7 @@ class TextureAtlas:
             import spiritstream.image as Image
             from pathlib import Path
             p = Path(__file__).parent.parent / "GlyphAtlas.bmp"
-            Image.write(list(reversed(self.bitmap)), p)
+            Image.write(list(self.bitmap), p)
             raise NotImplementedError(f"Could not fit texture {w}x{h} in the atlas. For debugging, writing bitmap to {p}")
         i, x, y = pos
         # Update skyline: insert new step and remove covered steps
@@ -78,7 +91,7 @@ class TextureAtlas:
         j = i + 1
         while j < len(self.skyline) and self.skyline[j][0] < curr_x: del self.skyline[j]
         if j == len(self.skyline) or self.skyline[j][0] > curr_x: self.skyline.insert(j, (curr_x, y))
-        ret = self.coordinates[id] = (x/self.size, y/self.size, w/self.size, h/self.size)
+        ret = self.metrics[key] = BitmapMetrics(w, h, x/self.size, y/self.size, w/self.size, h/self.size)
         
         # populate self.texture with values
         for row in range(h):
